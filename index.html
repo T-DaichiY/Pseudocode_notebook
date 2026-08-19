@@ -118,7 +118,7 @@ window.fbOpen = async (notebookId) => {
 
   window._notebookState = data.sharedState || {};
   window._executionCounter = 0;
-  window._globalProcs = {}; window._globalFuncs = {};
+  window._globalProcs = {}; window._globalFuncs = {}; window._globalFiles = {};
   window._currentNotebookId = notebookId;
 
   document.getElementById('cells-container').innerHTML = '';
@@ -174,6 +174,7 @@ function showToast(msg, color) {
   t.textContent = msg; t.style.background = color; t.style.opacity = '1';
   setTimeout(() => t.style.opacity = '0', 2500);
 }
+window.showToast = showToast;
 </script>
 
 <!-- CodeMirror 6 via ESM -->
@@ -269,7 +270,12 @@ window.createPseudoEditor = function(textareaId, initialCode) {
         lineNumbers(), highlightActiveLineGutter(), highlightActiveLine(),
         history(), drawSelection(), pseudoLang,
         syntaxHighlighting(pseudoHighlight), pseudoTheme,
-        keymap.of([...defaultKeymap, ...historyKeymap, ...completionKeymap, indentWithTab]),
+        keymap.of([
+          {key:'Shift-Enter', preventDefault:true, run:()=>{const m=textareaId.match(/^code-(\d+)$/);if(m&&window.runCell)window.runCell(Number(m[1]));return true;}},
+          {key:'Alt-Enter', preventDefault:true, run:()=>{const m=textareaId.match(/^code-(\d+)$/);if(m&&window.focusNextCell)window.focusNextCell(Number(m[1]));return true;}},
+          {key:'Mod-Enter', preventDefault:true, run:()=>{const m=textareaId.match(/^code-(\d+)$/);if(m&&window.runCell)window.runCell(Number(m[1]));return true;}},
+          ...defaultKeymap, ...historyKeymap, ...completionKeymap, indentWithTab
+        ]),
         autocompletion({ override: [pseudoCompletion] }),
         arrowHandler, EditorView.lineWrapping,
         EditorView.updateListener.of(u => { if (u.docChanged) ta.value = u.state.doc.toString(); }),
@@ -392,7 +398,8 @@ header{background:var(--surface);border-bottom:1px solid var(--border);padding:0
 .btn-run:hover{background:var(--green2);} .btn-run:disabled{background:#a7c9b5;cursor:not-allowed;}
 .btn-del{background:none;border:none;color:var(--muted);cursor:pointer;padding:2px 5px;border-radius:4px;font-size:.78rem;}
 .btn-del:hover{color:var(--red);background:#fff0f0;}
-.code-area{display:none;}
+.code-area{display:none;width:100%;min-height:80px;padding:14px 16px;border:none;outline:none;background:#fff;color:#1a1e2e;font-family:'IBM Plex Mono',monospace;font-size:0.84rem;line-height:1.7;resize:vertical;box-sizing:border-box;}
+.code-area:focus{background:#f0f4ff;}
 [id^="cmwrap-"]{width:100%;background:#fff;}
 [id^="cmwrap-"] .cm-editor{width:100%;min-height:80px;}
 .legend{display:flex;flex-wrap:wrap;gap:7px;padding:6px 14px;background:#fafbff;border-top:1px solid var(--border);font-size:.67rem;font-family:'IBM Plex Mono',monospace;align-items:center;}
@@ -469,7 +476,7 @@ body.student .output-panel.on{border-radius:10px;font-size:.92rem;padding:18px 2
     <div style="width:1px;height:28px;background:var(--border);margin:0 4px;"></div>
     <!-- Auth -->
     <div id="auth-signed-out">
-      <button class="btn-signin" onclick="fbSignIn()">
+      <button class="btn-signin" onclick="if(window.fbSignIn){fbSignIn()}else{alert('Cloud sign-in unavailable — check your connection.')}">
         <svg width="14" height="14" viewBox="0 0 24 24"><path fill="white" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="white" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="white" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/><path fill="white" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
         Sign in with Google
       </button>
@@ -573,6 +580,7 @@ window._notebookState    = {};
 window._executionCounter = 0;
 window._globalProcs      = {};
 window._globalFuncs      = {};
+window._globalFiles      = {};
 window._currentNotebookId = null;
 let studentMode = false;
 
@@ -604,15 +612,15 @@ const EXAMPLES = [
 DECLARE playerName : STRING
 DECLARE score : INTEGER
 DECLARE lives : INTEGER
-playerName <- "Dai"
-score <- 0
-lives <- 3
+playerName ← "Dai"
+score ← 0
+lives ← 3
 OUTPUT "Player: " & playerName
 OUTPUT "Score:  " & score
 OUTPUT "Lives:  " & lives`,
 
 `// Cell 2: Update score (inherits Cell 1 vars)
-score <- score + 50
+score ← score + 50
 OUTPUT "Score updated to: " & score`,
 
 `// Cell 3: Type checking
@@ -654,7 +662,7 @@ window._refreshStatePanel = refreshStatePanel;
 function resetState() {
   if(!confirm('Reset all shared variable state?')) return;
   notebookState={}; window._notebookState={}; window._executionCounter=0;
-  window._globalProcs={}; window._globalFuncs={};
+  window._globalProcs={}; window._globalFuncs={}; window._globalFiles={};
   refreshStatePanel();
   cells.forEach(c=>{const t=document.getElementById('tag-'+c.id);if(t)t.textContent='not run';});
 }
@@ -688,7 +696,7 @@ function addCell(code) {
   ta.addEventListener('keydown',e=>handleKeydown(e,id));
 
   const legend=document.createElement('div'); legend.className='legend';
-  legend.innerHTML='<span class="leg-item"><span class="leg-dot" style="background:#2563eb"></span>keyword</span><span class="leg-item"><span class="leg-dot" style="background:#7c3aed"></span>type</span><span class="leg-item"><span class="leg-dot" style="background:#059669"></span>string</span><span class="leg-item"><span class="leg-dot" style="background:#d97706"></span>number</span><span class="leg-item"><span class="leg-dot" style="background:#e11d48"></span>← op</span><span class="leg-item"><span class="leg-dot" style="background:#94a3b8"></span>// comment</span><span class="leg-hint">💡 &lt;- → ←  |  ⇧Enter to run</span>';
+  legend.innerHTML='<span class="leg-item"><span class="leg-dot" style="background:#2563eb"></span>keyword</span><span class="leg-item"><span class="leg-dot" style="background:#7c3aed"></span>type</span><span class="leg-item"><span class="leg-dot" style="background:#059669"></span>string</span><span class="leg-item"><span class="leg-dot" style="background:#d97706"></span>number</span><span class="leg-item"><span class="leg-dot" style="background:#e11d48"></span>← op</span><span class="leg-item"><span class="leg-dot" style="background:#94a3b8"></span>// comment</span><span class="leg-hint">💡 &lt;- → ←  |  ⇧Enter to run  |  ⌥Enter next cell</span>';
 
   const outEl=document.createElement('div'); outEl.className='output-panel'; outEl.id='out-'+id;
   const sLabel=document.createElement('div'); sLabel.className='s-label'; sLabel.textContent='Cell '+id+' output';
@@ -701,7 +709,24 @@ function addCell(code) {
 
   setTimeout(()=>{
     if(window.createPseudoEditor){ window.createPseudoEditor('code-'+id,code||''); }
-    else { ta.style.display='block'; const retry=setInterval(()=>{ if(window.createPseudoEditor){ clearInterval(retry); ta.style.display='none'; window.createPseudoEditor('code-'+id,ta.value); }},200); }
+    else {
+      ta.style.display='block';
+      let attempts=0;
+      const retry=setInterval(()=>{
+        if(window.createPseudoEditor){
+          clearInterval(retry);
+          ta.style.display='none';
+          window.createPseudoEditor('code-'+id,ta.value);
+          return;
+        }
+        attempts++;
+        if(attempts===40&&!window._cmFallbackWarned){
+          window._cmFallbackWarned=true;
+          if(window.showToast)window.showToast('⚠️ Advanced editor unavailable — using basic mode. Check your connection.','#f87171');
+          else alert('Advanced editor unavailable — using basic mode. Check your connection.');
+        }
+      },200);
+    }
   },60);
 }
 window._addCell = addCell;
@@ -758,7 +783,7 @@ class PseudoInterpreter {
   constructor(shared){
     this.env={}; this.types={};
     for(const[k,v]of Object.entries(shared)){this.env[k]=v.value;this.types[k]=v.type;}
-    this.procedures={}; this.functions={}; this.output=[]; this.inputValues=[];
+    this.procedures={}; this.functions={}; this.output=[]; this.inputValues=[]; this.files={};
   }
   run(src){
     const lines=this.tokenize(src.split('\n').map(l=>l.trimEnd()));
@@ -776,7 +801,10 @@ class PseudoInterpreter {
     const s=lines[i].src;
     if(/^DECLARE\s+/i.test(s)){
       const m=s.match(/^DECLARE\s+(\w+)\s*(?::\s*(\w+(?:\[.*?\])?))?/i);
-      if(m){const name=m[1],type=(m[2]||'').toUpperCase();this.types[name]=type||'UNKNOWN';
+      if(m){const name=m[1],type=m[2]||'',baseType=type.split('[')[0];
+        if(type&&!['INTEGER','REAL','STRING','BOOLEAN','CHAR','DATE'].includes(baseType)&&baseType!=='ARRAY')
+          this.err('Unknown data type "'+type+'" in DECLARE '+name+' — expected INTEGER, REAL, STRING, BOOLEAN, CHAR, DATE, or ARRAY (case-sensitive)');
+        this.types[name]=type||'UNKNOWN';
         if(!(name in this.env)){if(type==='INTEGER'||type==='REAL')this.env[name]=0;else if(type==='STRING')this.env[name]='';else if(type==='BOOLEAN')this.env[name]=false;else if(type.startsWith('ARRAY'))this.env[name]={};else this.env[name]=null;}}
       return i+1;}
     if(/^CONSTANT\s+/i.test(s)){const m=s.match(/^CONSTANT\s+(\w+)\s*[=←]\s*(.+)/i);if(m)this.env[m[1]]=this.eval(m[2].trim());return i+1;}
@@ -794,6 +822,33 @@ class PseudoInterpreter {
       if((type==='INTEGER'||type==='REAL')&&raw!==''&&!isNaN(Number(raw)))val=type==='INTEGER'?parseInt(raw):parseFloat(raw);
       else if(type==='BOOLEAN')val=raw.toLowerCase()==='true';
       this.env[name]=val; this.output.push('INPUT '+name+' \u2192 '+val); return i+1;}
+    if(/^OPENFILE\s+/i.test(s)){
+      const m=s.match(/^OPENFILE\s+(.+?)\s+FOR\s+(READ|WRITE|APPEND)\s*$/i);
+      if(!m)this.err('Invalid OPENFILE \u2014 expected OPENFILE <file> FOR READ|WRITE|APPEND');
+      const fname=String(this.eval(m[1].trim())),mode=m[2].toUpperCase();
+      if(mode==='WRITE')this.files[fname]={lines:[],readIndex:0,mode:'WRITE'};
+      else if(mode==='APPEND'){if(!this.files[fname])this.files[fname]={lines:[],readIndex:0,mode:'APPEND'};else this.files[fname].mode='APPEND';}
+      else{if(!this.files[fname])this.err('File "'+fname+'" not found \u2014 cannot open for READ');this.files[fname].mode='READ';this.files[fname].readIndex=0;}
+      return i+1;}
+    if(/^WRITEFILE\s+/i.test(s)){
+      const rest=s.replace(/^WRITEFILE\s+/i,''),parts=this.splitTop(rest,',');
+      if(parts.length<2)this.err('Invalid WRITEFILE \u2014 expected WRITEFILE <file>, <data>');
+      const fname=String(this.eval(parts[0].trim())),f=this.files[fname];
+      if(!f||(f.mode!=='WRITE'&&f.mode!=='APPEND'))this.err('File "'+fname+'" is not open for WRITE/APPEND');
+      f.lines.push(String(this.eval(parts.slice(1).join(',').trim())));
+      return i+1;}
+    if(/^READFILE\s+/i.test(s)){
+      const rest=s.replace(/^READFILE\s+/i,''),parts=this.splitTop(rest,',');
+      if(parts.length<2)this.err('Invalid READFILE \u2014 expected READFILE <file>, <variable>');
+      const fname=String(this.eval(parts[0].trim())),varName=parts[1].trim(),f=this.files[fname];
+      if(!f||f.mode!=='READ')this.err('File "'+fname+'" is not open for READ');
+      if(f.readIndex>=f.lines.length)this.err('Attempted to READFILE past end of "'+fname+'" \u2014 check EOF('+fname+') first');
+      this.env[varName]=f.lines[f.readIndex++];
+      return i+1;}
+    if(/^CLOSEFILE\s+/i.test(s)){
+      const fname=String(this.eval(s.replace(/^CLOSEFILE\s+/i,'').trim()));
+      if(this.files[fname])this.files[fname].mode='CLOSED';
+      return i+1;}
     if(/^CALL\s+/i.test(s)){this.callProc(s.replace(/^CALL\s+/i,'').trim());return i+1;}
     if(/^RETURN\s+/i.test(s))throw{type:'return',value:this.eval(s.replace(/^RETURN\s+/i,'').trim())};
     if(/^IF\s+/i.test(s))return this.execIf(lines,i,to);
@@ -809,7 +864,30 @@ class PseudoInterpreter {
     if(/^[A-Za-z_]\w*\s*\(/.test(s)){this.callProc(s);return i+1;}
     return i+1;
   }
-  assign(lhs,rhs){const m=lhs.match(/^(\w+)\[(.+)\]$/);if(m){const name=m[1],idx=this.eval(m[2]);if(typeof this.env[name]!=='object')this.env[name]={};this.env[name][idx]=this.eval(rhs);}else this.env[lhs]=this.eval(rhs);}
+  assign(lhs,rhs){
+    const m=lhs.match(/^(\w+)\[(.+)\]$/);
+    if(m){
+      const name=m[1];
+      if(!(name in this.env))this.err('Variable "'+name+'" is not declared — use DECLARE before assigning to it');
+      const idx=this.idxKey(m[2]);
+      if(typeof this.env[name]!=='object')this.env[name]={};
+      this.env[name][idx]=this.eval(rhs);
+    } else {
+      if(!(lhs in this.env))this.err('Variable "'+lhs+'" is not declared — use DECLARE before assigning to it');
+      const val=this.eval(rhs);
+      this.checkType(lhs,val);
+      this.env[lhs]=val;
+    }
+  }
+  checkType(name,val){
+    const type=this.types[name];
+    if(!type)return;
+    if((type==='INTEGER'||type==='REAL')&&(typeof val!=='number'||Number.isNaN(val)))
+      this.err('Type mismatch: cannot assign '+JSON.stringify(val)+' to '+type+' variable "'+name+'"');
+    if(type==='BOOLEAN'&&typeof val!=='boolean')
+      this.err('Type mismatch: cannot assign '+JSON.stringify(val)+' to BOOLEAN variable "'+name+'"');
+  }
+  idxKey(s){return this.splitTop(s,',').map(p=>this.eval(p.trim())).join(',');}
   execIf(lines,i,to){
     const condStr=lines[i].src.replace(/^IF\s+/i,'').replace(/\s+THEN\s*$/i,'').trim();
     let depth=0,thenIdx=-1,elseIdx=-1,endIdx=-1;
@@ -827,16 +905,21 @@ class PseudoInterpreter {
     if(nextIdx<0)this.err('Missing NEXT');
     this.env[vn]=Number(this.eval(m[2]));let iter=0;
     while((step>0?this.env[vn]<=stop:this.env[vn]>=stop)&&iter++<10000){this.execBlock(lines,i+1,nextIdx);this.env[vn]=Number(this.env[vn])+step;}
+    if(iter>=10000)this.output.push('⚠ FOR loop stopped after 10000 iterations (possible infinite loop — check STEP/TO values)');
     return nextIdx+1;}
   execWhile(lines,i,to){
     const condStr=lines[i].src.replace(/^WHILE\s+/i,'').trim();let depth=0,endIdx=-1;
     for(let j=i;j<to;j++){if(/^WHILE\s+/i.test(lines[j].src))depth++;if(/^ENDWHILE/i.test(lines[j].src)){depth--;if(depth===0){endIdx=j;break;}}}
     if(endIdx<0)this.err('Missing ENDWHILE');let iter=0;
-    while(this.eval(condStr)&&iter++<10000)this.execBlock(lines,i+1,endIdx);return endIdx+1;}
+    while(this.eval(condStr)&&iter++<10000)this.execBlock(lines,i+1,endIdx);
+    if(iter>=10000)this.output.push('⚠ WHILE loop stopped after 10000 iterations (possible infinite loop — check the condition)');
+    return endIdx+1;}
   execRepeat(lines,i,to){
     let untilIdx=-1;for(let j=i+1;j<to;j++){if(/^UNTIL\s+/i.test(lines[j].src)){untilIdx=j;break;}}
     if(untilIdx<0)this.err('Missing UNTIL');const condStr=lines[untilIdx].src.replace(/^UNTIL\s+/i,'').trim();
-    let iter=0;do{this.execBlock(lines,i+1,untilIdx);iter++;}while(!this.eval(condStr)&&iter<10000);return untilIdx+1;}
+    let iter=0;do{this.execBlock(lines,i+1,untilIdx);iter++;}while(!this.eval(condStr)&&iter<10000);
+    if(iter>=10000)this.output.push('⚠ REPEAT loop stopped after 10000 iterations (possible infinite loop — check the UNTIL condition)');
+    return untilIdx+1;}
   execCase(lines,i,to){
     const val=this.eval(lines[i].src.replace(/^CASE\s+OF\s+/i,'').trim());let endIdx=-1;
     for(let j=i+1;j<to;j++){if(/^ENDCASE/i.test(lines[j].src)){endIdx=j;break;}}
@@ -862,15 +945,17 @@ class PseudoInterpreter {
     const m=callStr.match(/^(\w+)\s*(?:\(([^)]*)\))?/);if(!m)return;
     const name=m[1],argStrs=m[2]?m[2].split(',').map(s=>s.trim()):[];
     const proc=this.procedures[name];if(!proc){this.output.push('[CALL '+name+' — not defined]');return;}
+    const outerKeys=new Set(Object.keys(this.env));
     const child=this.makeChild();proc.params.forEach((p,idx)=>{if(argStrs[idx]!==undefined)child.env[p]=this.eval(argStrs[idx]);});
     try{child.execBlock(proc.body,0,proc.body.length);}catch(e){if(e.type!=='return')throw e;}
-    this.output.push(...child.output);this.inputValues=child.inputValues;Object.assign(this.env,child.env);}
+    this.output.push(...child.output);this.inputValues=child.inputValues;
+    for(const k of outerKeys)if(k in child.env)this.env[k]=child.env[k];}
   callFunc(name,argStrs){
     const fn=this.functions[name];if(!fn)this.err('Function '+name+' not defined');
     const child=this.makeChild();fn.params.forEach((p,idx)=>{if(argStrs[idx]!==undefined)child.env[p]=this.eval(argStrs[idx]);});
     let ret=null;try{child.execBlock(fn.body,0,fn.body.length);}catch(e){if(e.type==='return')ret=e.value;else throw e;}
     this.output.push(...child.output);this.inputValues=child.inputValues;return ret;}
-  makeChild(){const c=new PseudoInterpreter({});c.env=Object.assign({},this.env);c.types=Object.assign({},this.types);c.procedures=this.procedures;c.functions=this.functions;c.inputValues=this.inputValues;return c;}
+  makeChild(){const c=new PseudoInterpreter({});c.env=Object.assign({},this.env);c.types=Object.assign({},this.types);c.procedures=this.procedures;c.functions=this.functions;c.inputValues=this.inputValues;c.files=this.files;return c;}
   eval(raw){
     const s=raw.trim();if(!s)return'';
     const amp=this.splitTop(s,'&');if(amp.length>1)return amp.map(p=>String(this.eval(p.trim()))).join('');
@@ -885,16 +970,21 @@ class PseudoInterpreter {
     const md=this.findMul(s);if(md){const L=Number(this.eval(s.slice(0,md.idx).trim())),R=Number(this.eval(s.slice(md.idx+md.op.length).trim()));if(md.op==='*')return L*R;if(md.op==='/')return L/R;if(md.op==='MOD')return L%R;if(md.op==='DIV')return Math.trunc(L/R);}
     if(s[0]==='-')return-Number(this.eval(s.slice(1)));
     if(/^-?\d+(\.\d+)?$/.test(s))return Number(s);
-    const fm=s.match(/^(\w+)\s*\(([^)]*)\)$/);
-    if(fm){const fname=fm[1],args=fm[2]?fm[2].split(',').map(a=>a.trim()):[];
+    const fm=s.match(/^(\w+)\s*\(/);
+    const fmOpenIdx=fm?fm[0].length-1:-1;
+    const fmCloseRel=fm?this.matchParen(s.slice(fmOpenIdx)):-1;
+    if(fm&&fmCloseRel>=0&&fmOpenIdx+fmCloseRel===s.length-1){
+      const fname=fm[1],argsStr=s.slice(fmOpenIdx+1,s.length-1);
+      const args=argsStr.trim()?this.splitTop(argsStr,',').map(a=>a.trim()):[];
       switch(fname.toUpperCase()){
         case'LENGTH':case'LEN':return String(this.eval(args[0])).length;
         case'UCASE':case'UPPER':return String(this.eval(args[0])).toUpperCase();
         case'LCASE':case'LOWER':return String(this.eval(args[0])).toLowerCase();
-        case'SUBSTR':case'MID':{const st=String(this.eval(args[0])),fr=Number(this.eval(args[1]))-1,ln=args[2]?Number(this.eval(args[2])):undefined;return ln!==undefined?st.substr(fr,ln):st.substr(fr);}
+        case'SUBSTR':case'MID':case'SUBSTRING':{const st=String(this.eval(args[0])),fr=Number(this.eval(args[1]))-1,ln=args[2]?Number(this.eval(args[2])):undefined;return ln!==undefined?st.substr(fr,ln):st.substr(fr);}
         case'LEFT':return String(this.eval(args[0])).slice(0,Number(this.eval(args[1])));
         case'RIGHT':{const st=String(this.eval(args[0]));return st.slice(st.length-Number(this.eval(args[1])));}
-        case'INT':case'ROUND':return Math.round(Number(this.eval(args[0])));
+        case'INT':return Math.trunc(Number(this.eval(args[0])));
+        case'ROUND':{const places=args[1]!==undefined?Number(this.eval(args[1])):0,factor=Math.pow(10,places);return Math.round(Number(this.eval(args[0]))*factor)/factor;}
         case'REAL':return parseFloat(this.eval(args[0]));
         case'STR':case'NUM_TO_STR':return String(this.eval(args[0]));
         case'NUM':case'STR_TO_NUM':return Number(this.eval(args[0]));
@@ -905,7 +995,7 @@ class PseudoInterpreter {
         case'CHR':return String.fromCharCode(Number(this.eval(args[0])));
         case'MOD':return Number(this.eval(args[0]))%Number(this.eval(args[1]));
         case'DIV':return Math.trunc(Number(this.eval(args[0]))/Number(this.eval(args[1])));
-        case'EOF':return false;
+        case'EOF':{const fname=String(this.eval(args[0])),f=this.files[fname];return!f||f.readIndex>=f.lines.length;}
         case'TYPEOF':{const vn=args[0]?.trim();if(vn in this.types&&this.types[vn])return this.types[vn];return this._inferType(vn);}
         case'ISINTEGER':case'IS_INTEGER':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t==='INTEGER')return true;if(t)return false;const v=this.eval(vn);return typeof v==='number'&&Number.isInteger(v);}
         case'ISREAL':case'IS_REAL':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t==='REAL')return true;if(t)return false;return typeof this.eval(vn)==='number';}
@@ -915,14 +1005,15 @@ class PseudoInterpreter {
         case'ISNUMERIC':case'IS_NUMERIC':{const v=String(this.eval(args[0]?.trim()));return v.trim()!==''&&!isNaN(Number(v));}
       }
       if(this.functions[fname])return this.callFunc(fname,args);return 0;}
-    const arrm=s.match(/^(\w+)\[(.+)\]$/);if(arrm){const arr=this.env[arrm[1]];return(arr&&typeof arr==='object')?(arr[this.eval(arrm[2])]??0):0;}
-    if(/^[A-Za-z_]\w*$/.test(s))return s in this.env?this.env[s]:0;
+    const arrm=s.match(/^(\w+)\[(.+)\]$/);if(arrm){if(!(arrm[1] in this.env))this.err('Variable "'+arrm[1]+'" is not declared');const arr=this.env[arrm[1]];return(arr&&typeof arr==='object')?(arr[this.idxKey(arrm[2])]??0):0;}
+    if(/^[A-Za-z_]\w*$/.test(s)){if(s in this.env)return this.env[s];this.err('Variable "'+s+'" is not declared');}
+    if(s[0]==='"'||s[0]==="'")this.err('Malformed string literal '+s+' — strings must start and end with matching " or \' quotes');
     return s;}
   matchParen(s){let d=0;for(let i=0;i<s.length;i++){if(s[i]==='(')d++;if(s[i]===')')d--;if(d===0)return i;}return-1;}
   splitTop(s,op){const isKw=/^[A-Z]+$/.test(op);const parts=[];let depth=0,inStr=false,strCh='',buf='',i=0;while(i<s.length){const ch=s[i];if(inStr){buf+=ch;if(ch===strCh)inStr=false;i++;continue;}if(ch==='"'||ch==="'"){inStr=true;strCh=ch;buf+=ch;i++;continue;}if(ch==='('){depth++;buf+=ch;i++;continue;}if(ch===')'){depth--;buf+=ch;i++;continue;}if(depth===0){if(!isKw&&s.startsWith(op,i)){parts.push(buf);buf='';i+=op.length;continue;}if(isKw){const rest=s.slice(i);const m=rest.match(new RegExp('^'+op+'\\b','i'));if(m){parts.push(buf);buf='';i+=m[0].length;continue;}}}buf+=ch;i++;}parts.push(buf);return parts;}
   findTop(s,op){let depth=0,inStr=false,strCh='';for(let i=0;i<s.length;i++){const ch=s[i];if(inStr){if(ch===strCh)inStr=false;continue;}if(ch==='"'||ch==="'"){inStr=true;strCh=ch;continue;}if(ch==='(')depth++;if(ch===')')depth--;if(depth===0&&s.startsWith(op,i))return i;}return-1;}
-  findAddSub(s){let depth=0,inStr=false;for(let i=s.length-1;i>=0;i--){const ch=s[i];if(ch===')')depth++;if(ch==='(')depth--;if(ch==='"'||ch==="'")inStr=!inStr;if(!inStr&&depth===0&&(ch==='+'||ch==='-')&&i>0&&/[\w\)"']/.test(s[i-1]))return i;}return-1;}
-  findMul(s){let depth=0,inStr=false;for(let i=s.length-1;i>=0;i--){const ch=s[i];if(ch===')')depth++;if(ch==='(')depth--;if(ch==='"'||ch==="'")inStr=!inStr;if(!inStr&&depth===0){if(ch==='*'||ch==='/')return{idx:i,op:ch};for(const kw of['MOD','DIV']){const start=i-kw.length+1;if(start>=0&&s.slice(start,i+1).toUpperCase()===kw){const before=start-1,after=i+1;if((before<0||/\W/.test(s[before]))&&(after>=s.length||/\W/.test(s[after])))return{idx:start,op:kw};}}}}return null;}
+  findAddSub(s){let depth=0,inStr=false;for(let i=s.length-1;i>=0;i--){const ch=s[i];if(ch===')'||ch===']')depth++;if(ch==='('||ch==='[')depth--;if(ch==='"'||ch==="'")inStr=!inStr;if(!inStr&&depth===0&&(ch==='+'||ch==='-')){let j=i-1;while(j>=0&&/\s/.test(s[j]))j--;if(j>=0&&/[\w\)\]"']/.test(s[j]))return i;}}return-1;}
+  findMul(s){let depth=0,inStr=false;for(let i=s.length-1;i>=0;i--){const ch=s[i];if(ch===')')depth++;if(ch==='(')depth--;if(ch==='"'||ch==="'")inStr=!inStr;if(!inStr&&depth===0){if(ch==='*'||ch==='/')return{idx:i,op:ch};for(const kw of['MOD','DIV']){const start=i-kw.length+1;if(start>=0&&s.slice(start,i+1).toUpperCase()===kw){const before=start-1,after=i+1;if(!((before<0||/\W/.test(s[before]))&&(after>=s.length||/\W/.test(s[after]))))continue;let pb=before;while(pb>=0&&/\s/.test(s[pb]))pb--;if(!(pb>=0&&/[\w\)\]"']/.test(s[pb])))continue;return{idx:start,op:kw};}}}}return null;}
   _inferType(vn){if(!(vn in this.env))return'UNDECLARED';const v=this.env[vn];if(typeof v==='boolean')return'BOOLEAN';if(typeof v==='number')return Number.isInteger(v)?'INTEGER':'REAL';if(typeof v==='string')return'STRING';if(typeof v==='object')return'ARRAY';return'UNKNOWN';}
   err(msg){throw{type:'pseudo_error',msg};}
 }
@@ -944,12 +1035,13 @@ async function runCell(id){
     interp.inputValues=inputValues;
     interp.procedures=Object.assign({},window._globalProcs);
     interp.functions=Object.assign({},window._globalFuncs);
+    interp.files=Object.assign({},window._globalFiles);
     const result=interp.run(code);
     for(const[name,value]of Object.entries(result.env)){
       if(name in interp.types||name in notebookState)
         notebookState[name]={type:result.types[name]||(notebookState[name]?notebookState[name].type:'UNKNOWN'),value,cellId:id};
     }
-    Object.assign(window._globalProcs,interp.procedures);Object.assign(window._globalFuncs,interp.functions);
+    Object.assign(window._globalProcs,interp.procedures);Object.assign(window._globalFuncs,interp.functions);Object.assign(window._globalFiles,interp.files);
     const text=result.output||'(no output)';
     outEl.textContent=text;outEl.className='output-panel on'+(text.startsWith('ERROR:')?' err':'');
     if(tag)tag.textContent=text.startsWith('ERROR:')?'error':'run #'+(++window._executionCounter);
@@ -973,7 +1065,7 @@ function closeDrawer(){document.getElementById('nb-drawer').classList.remove('op
 function newNotebook(){
   if(!confirm('Start a new notebook? Current work will be cleared.'))return;
   notebookState={}; window._notebookState={}; window._executionCounter=0;
-  window._globalProcs={}; window._globalFuncs={}; window._currentNotebookId=null;
+  window._globalProcs={}; window._globalFuncs={}; window._globalFiles={}; window._currentNotebookId=null;
   document.getElementById('cells-container').innerHTML=''; cells.length=0; window._cellIdCounter=0;
   document.getElementById('nb-title').value='Untitled Notebook';
   EXAMPLES.forEach(code=>addCell(code));
@@ -1001,15 +1093,20 @@ function toggleStudentView(){
 function toggleRef(){const b=document.getElementById('ref-body'),i=document.getElementById('ref-icon'),o=b.classList.toggle('open');i.textContent=o?'▼ Hide':'▶ Show';}
 function toggleState(){const b=document.getElementById('state-body'),i=document.getElementById('state-icon'),o=b.classList.toggle('open');i.textContent=o?'▼ Hide':'▶ Show';}
 
+function focusNextCell(id){
+  const idx=cells.findIndex(c=>c.id===id);
+  if(idx<0||idx>=cells.length-1)return;
+  const ta=document.getElementById('code-'+cells[idx+1].id);
+  if(!ta)return;
+  if(ta._cmView)ta._cmView.focus();else ta.focus();
+}
+
 function handleKeydown(e,id){
   if(e.key==='-'&&e.target.tagName==='TEXTAREA'){const ta=e.target,pos=ta.selectionStart,before=ta.value.slice(Math.max(0,pos-1),pos);if(before==='<'){e.preventDefault();ta.value=ta.value.slice(0,pos-1)+'←'+ta.value.slice(pos);ta.selectionStart=ta.selectionEnd=pos;return;}}
+  if(e.key==='Enter'&&e.altKey){e.preventDefault();focusNextCell(id);return;}
   if(e.key==='Enter'&&(e.ctrlKey||e.metaKey||e.shiftKey)){e.preventDefault();runCell(id);}
 }
 
-document.addEventListener('keydown',e=>{
-  if(e.key!=='Enter'||!(e.ctrlKey||e.metaKey||e.shiftKey))return;
-  for(const c of cells){const wrap=document.getElementById('cmwrap-code-'+c.id);if(wrap&&wrap.contains(document.activeElement)){e.preventDefault();runCell(c.id);return;}}
-});
 </script>
 </body>
 </html>
