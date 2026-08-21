@@ -822,20 +822,22 @@ class PseudoInterpreter {
     for(const[k,v]of Object.entries(shared)){this.env[k]=v.value;this.types[k]=v.type;}
     this.procedures={}; this.functions={}; this.output=[]; this.files={};
     this.inputProvider = inputProvider || (async ()=>'');
+    this.currentLine = null;
   }
   async run(src){
     const lines=this.tokenize(src.split('\n').map(l=>l.trimEnd()));
     try{await this.execBlock(lines,0,lines.length);}
     catch(e){
       if(e.type==='return'){}
-      else if(e.type==='pseudo_error')this.output.push('ERROR: '+e.msg);
-      else this.output.push('ERROR: '+e.message);
+      else if(e.type==='pseudo_error')this.output.push('ERROR (line '+(e.line??'?')+'): '+e.msg);
+      else this.output.push('ERROR (line '+(this.currentLine??'?')+'): '+e.message);
     }
     return{output:this.output.join('\n'),env:this.env,types:this.types};
   }
   tokenize(lines){return lines.map((raw,i)=>({raw,src:raw.replace(/\/\/.*$/,'').trim().replace(/<-/g,'←'),ln:i+1})).filter(l=>l.src.length>0);}
   async execBlock(lines,from,to){let i=from;while(i<to)i=await this.execLine(lines,i,to);}
   async execLine(lines,i,to){
+    this.currentLine=lines[i].ln;
     const s=lines[i].src;
     if(/^DECLARE\s+/i.test(s)){
       const m=s.match(/^DECLARE\s+((?:\w+\s*,\s*)*\w+)\s*(?::\s*(\w+(?:\[.*?\])?))?/i);
@@ -947,7 +949,7 @@ class PseudoInterpreter {
     return endIdx+1;}
   async execFor(lines,i,to){
     const m=lines[i].src.match(/^FOR\s+(\w+)\s*←\s*(.+?)\s+TO\s+(.+?)(?:\s+STEP\s+(.+))?$/i);
-    if(!m)this.err('Invalid FOR');const vn=m[1],stop=Number(await this.eval(m[3])),step=m[4]?Number(await this.eval(m[4])):1;
+    if(!m)this.err('Invalid FOR — expected: FOR variable ← start TO end [STEP step]  (check the ← arrow between the variable and the start value)');const vn=m[1],stop=Number(await this.eval(m[3])),step=m[4]?Number(await this.eval(m[4])):1;
     let depth=0,nextIdx=-1;
     for(let j=i;j<to;j++){if(/^FOR\s+/i.test(lines[j].src))depth++;if(/^NEXT\s+/i.test(lines[j].src)){depth--;if(depth===0){nextIdx=j;break;}}}
     if(nextIdx<0)this.err('Missing NEXT');
@@ -1072,7 +1074,7 @@ class PseudoInterpreter {
   findAddSub(s){let depth=0,inStr=false;for(let i=s.length-1;i>=0;i--){const ch=s[i];if(ch===')'||ch===']')depth++;if(ch==='('||ch==='[')depth--;if(ch==='"'||ch==="'")inStr=!inStr;if(!inStr&&depth===0&&(ch==='+'||ch==='-')){let j=i-1;while(j>=0&&/\s/.test(s[j]))j--;if(j>=0&&/[\w\)\]"']/.test(s[j]))return i;}}return-1;}
   findMul(s){let depth=0,inStr=false;for(let i=s.length-1;i>=0;i--){const ch=s[i];if(ch===')')depth++;if(ch==='(')depth--;if(ch==='"'||ch==="'")inStr=!inStr;if(!inStr&&depth===0){if(ch==='*'||ch==='/')return{idx:i,op:ch};for(const kw of['MOD','DIV']){const start=i-kw.length+1;if(start>=0&&s.slice(start,i+1).toUpperCase()===kw){const before=start-1,after=i+1;if(!((before<0||/\W/.test(s[before]))&&(after>=s.length||/\W/.test(s[after]))))continue;let pb=before;while(pb>=0&&/\s/.test(s[pb]))pb--;if(!(pb>=0&&/[\w\)\]"']/.test(s[pb])))continue;return{idx:start,op:kw};}}}}return null;}
   _inferType(vn){if(!(vn in this.env))return'UNDECLARED';const v=this.env[vn];if(typeof v==='boolean')return'BOOLEAN';if(typeof v==='number')return Number.isInteger(v)?'INTEGER':'REAL';if(typeof v==='string')return'STRING';if(typeof v==='object')return'ARRAY';return'UNKNOWN';}
-  err(msg){throw{type:'pseudo_error',msg};}
+  err(msg){throw{type:'pseudo_error',msg,line:this.currentLine};}
 }
 
 // ═══════════════════════════════════════════
