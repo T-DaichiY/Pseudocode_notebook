@@ -56,9 +56,10 @@ window.fbSignOut = async () => {
 };
 
 // ── Save notebook to Firestore ───────────────────────
-window.fbSave = async () => {
+async function doSave(silent) {
   const user = window._fbUser;
-  if (!user) { alert('Please sign in first.'); return; }
+  if (!user) { if (!silent) alert('Please sign in first.'); return false; }
+  if (silent && !window._currentNotebookId) return false;
 
   const title    = document.getElementById('nb-title')?.value || 'Untitled';
   const cellData = window._cells.map(c => ({
@@ -75,9 +76,19 @@ window.fbSave = async () => {
     title, updatedAt: serverTimestamp(),
     cells: cellData, sharedState: window._notebookState
   });
+  return true;
+}
 
+window.fbSave = async () => {
+  const ok = await doSave(false);
+  if (!ok) return;
   showToast('☁️ Saved to your account!', '#10b981');
   loadNotebookList();
+};
+
+window._autoSave = async () => {
+  const ok = await doSave(true);
+  if (ok) window._lastAutoSaveAt = new Date();
 };
 
 // ── Load notebook list from Firestore ────────────────
@@ -238,9 +249,12 @@ const pseudoTheme = EditorView.theme({
 
 const completions = KEYWORDS.concat(TYPES).map(label => ({ label, type: 'keyword', boost: 99 }));
 function pseudoCompletion(ctx) {
-  const w = ctx.matchBefore(/[A-Z_][A-Z0-9_]*/);
+  const w = ctx.matchBefore(/[A-Za-z_][A-Za-z0-9_]*/);
   if (!w || (w.from === w.to && !ctx.explicit)) return null;
-  return { from: w.from, options: completions };
+  const typed = w.text.toLowerCase();
+  const options = completions.filter(c => c.label.toLowerCase().startsWith(typed));
+  if (!options.length) return null;
+  return { from: w.from, options };
 }
 
 const arrowHandler = EditorView.domEventHandlers({
@@ -253,6 +267,48 @@ const arrowHandler = EditorView.domEventHandlers({
     e.preventDefault();
     view.dispatch({ changes: { from: sel.from-1, to: sel.from, insert: '←' }, selection: { anchor: sel.from } });
     return true;
+  }
+});
+
+const AUTO_UPPER_WORDS = new Set([...KEYWORDS, ...TYPES]);
+const BOUNDARY_CHARS = new Set([
+  ' ', '\n', '\t', '(', ')', ',', ':', ';', '[', ']', '{', '}',
+  '"', "'", '.', '<', '>', '=', '+', '-', '*', '/', '←'
+]);
+function wordEndingAt(doc, pos) {
+  let start = pos;
+  while (start > 0 && /\w/.test(doc.sliceString(start - 1, start))) start--;
+  return { from: start, to: pos, text: doc.sliceString(start, pos) };
+}
+const autoUppercase = EditorView.updateListener.of(update => {
+  if (!update.docChanged) return;
+  let insertedChar = null, insertEnd = null, changeCount = 0;
+  update.changes.iterChanges((fromA, toA, fromB, toB) => {
+    changeCount++;
+    if (fromA === toA && toB - fromB === 1) {
+      insertedChar = update.state.doc.sliceString(fromB, toB);
+      insertEnd = toB;
+    }
+  });
+  if (changeCount !== 1 || insertedChar === null) return;
+  if (!BOUNDARY_CHARS.has(insertedChar)) return;
+  const boundaryPos = insertEnd - 1;
+  const w = wordEndingAt(update.state.doc, boundaryPos);
+  if (!w.text || !/^[A-Za-z_]\w*$/.test(w.text)) return;
+  const upper = w.text.toUpperCase();
+  if (w.text === upper) return;
+  if (!AUTO_UPPER_WORDS.has(upper)) return;
+  update.view.dispatch({ changes: { from: w.from, to: w.to, insert: upper } });
+});
+const autoUppercaseOnBlur = EditorView.domEventHandlers({
+  blur(e, view) {
+    const pos = view.state.selection.main.head;
+    const w = wordEndingAt(view.state.doc, pos);
+    if (!w.text || !/^[A-Za-z_]\w*$/.test(w.text)) return false;
+    const upper = w.text.toUpperCase();
+    if (w.text === upper || !AUTO_UPPER_WORDS.has(upper)) return false;
+    view.dispatch({ changes: { from: w.from, to: w.to, insert: upper } });
+    return false;
   }
 });
 
@@ -277,7 +333,7 @@ window.createPseudoEditor = function(textareaId, initialCode) {
           ...defaultKeymap, ...historyKeymap, ...completionKeymap, indentWithTab
         ]),
         autocompletion({ override: [pseudoCompletion] }),
-        arrowHandler, EditorView.lineWrapping,
+        arrowHandler, autoUppercase, autoUppercaseOnBlur, EditorView.lineWrapping,
         EditorView.updateListener.of(u => { if (u.docChanged) ta.value = u.state.doc.toString(); }),
       ]
     }),
@@ -355,7 +411,8 @@ header{background:var(--surface);border-bottom:1px solid var(--border);padding:0
 .nb-title{width:100%;border:none;background:transparent;font-family:'DM Sans',sans-serif;font-size:1.45rem;font-weight:700;color:var(--text);outline:none;padding:3px 0;border-bottom:2px solid transparent;transition:border-color .2s;}
 .nb-title:focus{border-bottom-color:var(--accent);}
 .nb-title::placeholder{color:#c0c7d8;}
-.nb-meta{font-size:.72rem;color:var(--muted);margin-top:3px;margin-bottom:22px;}
+.nb-meta{font-size:.72rem;color:var(--muted);margin-top:3px;margin-bottom:3px;}
+.nb-autosave-status{font-size:.68rem;color:var(--muted);opacity:.7;margin-bottom:22px;min-height:1em;}
 
 /* ── Quick Ref ── */
 .ref-panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;box-shadow:var(--shadow);margin-bottom:14px;}
@@ -496,6 +553,7 @@ body.student .output-panel.on{border-radius:10px;font-size:.92rem;padding:18px 2
 <div class="notebook">
   <input class="nb-title" id="nb-title" type="text" placeholder="Untitled Notebook" value="My Cambridge Pseudocode Notebook"/>
   <div class="nb-meta" id="nb-meta">Cambridge 9618 · PseudoLab · Sign in to save your work to the cloud ☁️</div>
+  <div class="nb-autosave-status" id="autosave-status"></div>
 
   <!-- Quick Reference -->
   <div class="ref-panel">
@@ -605,34 +663,22 @@ setInterval(() => {
 }, 1000);
 
 // ═══════════════════════════════════════════
-//  EXAMPLES
+//  AUTO-SAVE
 // ═══════════════════════════════════════════
-const EXAMPLES = [
-`// Cell 1: Declare and set shared variables
-DECLARE playerName : STRING
-DECLARE score : INTEGER
-DECLARE lives : INTEGER
-playerName ← "Dai"
-score ← 0
-lives ← 3
-OUTPUT "Player: " & playerName
-OUTPUT "Score:  " & score
-OUTPUT "Lives:  " & lives`,
-
-`// Cell 2: Update score (inherits Cell 1 vars)
-score ← score + 50
-OUTPUT "Score updated to: " & score`,
-
-`// Cell 3: Type checking
-TYPE_CHECK playerName, score, lives
-IF ISINTEGER(score)
-  THEN
-    OUTPUT "Score is a valid INTEGER"
-ENDIF`
-];
+setInterval(() => {
+  if (!window._fbUser || !window._currentNotebookId) return;
+  window._autoSave().then(() => {
+    const status = document.getElementById('autosave-status');
+    if (status && window._lastAutoSaveAt) {
+      const t = window._lastAutoSaveAt;
+      const hh = String(t.getHours()).padStart(2,'0'), mm = String(t.getMinutes()).padStart(2,'0'), ss = String(t.getSeconds()).padStart(2,'0');
+      status.textContent = 'Last saved ' + hh + ':' + mm + ':' + ss;
+    }
+  });
+}, 60000);
 
 window.addEventListener('DOMContentLoaded', () => {
-  EXAMPLES.forEach(code => addCell(code));
+  addCell();
 });
 
 // ═══════════════════════════════════════════
@@ -751,16 +797,12 @@ window._getCode = getCode;
 // ═══════════════════════════════════════════
 //  INPUT MODAL
 // ═══════════════════════════════════════════
-function scanInputs(src){
-  return src.split('\n').map(l=>l.replace(/\/\/.*$/,'').trim())
-    .filter(l=>/^INPUT\s+\w+/i.test(l)).map(l=>l.match(/^INPUT\s+(\w+)/i)[1]);
-}
-function promptInput(varName,idx,total){
+function promptInput(varName,count){
   return new Promise(resolve=>{
     document.getElementById('pseudo-modal')?.remove();
     const overlay=document.createElement('div');
     overlay.className='modal-overlay'; overlay.id='pseudo-modal';
-    overlay.innerHTML='<div class="modal-box"><div class="modal-lbl">INPUT required</div><div class="modal-var">'+varName+'</div><div class="modal-desc">Enter a value for <strong>'+varName+'</strong>:</div><input class="modal-field" id="modal-field" type="text" placeholder="type a value..." autocomplete="off"/><div class="modal-foot"><span class="modal-counter">Input '+(idx+1)+' of '+total+'</span><button class="btn-modal-ok" id="modal-ok">OK ↵</button></div></div>';
+    overlay.innerHTML='<div class="modal-box"><div class="modal-lbl">INPUT required</div><div class="modal-var">'+varName+'</div><div class="modal-desc">Enter a value for <strong>'+varName+'</strong>:</div><input class="modal-field" id="modal-field" type="text" placeholder="type a value..." autocomplete="off"/><div class="modal-foot"><span class="modal-counter">Input #'+count+'</span><button class="btn-modal-ok" id="modal-ok">OK ↵</button></div></div>';
     document.body.appendChild(overlay);
     const field=document.getElementById('modal-field');
     const ok=document.getElementById('modal-ok');
@@ -770,24 +812,20 @@ function promptInput(varName,idx,total){
     field.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();submit();} });
   });
 }
-async function collectInputs(src){
-  const names=scanInputs(src); const vals=[];
-  for(let i=0;i<names.length;i++) vals.push(await promptInput(names[i],i,names.length));
-  return vals;
-}
 
 // ═══════════════════════════════════════════
 //  INTERPRETER
 // ═══════════════════════════════════════════
 class PseudoInterpreter {
-  constructor(shared){
+  constructor(shared, inputProvider){
     this.env={}; this.types={};
     for(const[k,v]of Object.entries(shared)){this.env[k]=v.value;this.types[k]=v.type;}
-    this.procedures={}; this.functions={}; this.output=[]; this.inputValues=[]; this.files={};
+    this.procedures={}; this.functions={}; this.output=[]; this.files={};
+    this.inputProvider = inputProvider || (async ()=>'');
   }
-  run(src){
+  async run(src){
     const lines=this.tokenize(src.split('\n').map(l=>l.trimEnd()));
-    try{this.execBlock(lines,0,lines.length);}
+    try{await this.execBlock(lines,0,lines.length);}
     catch(e){
       if(e.type==='return'){}
       else if(e.type==='pseudo_error')this.output.push('ERROR: '+e.msg);
@@ -795,86 +833,96 @@ class PseudoInterpreter {
     }
     return{output:this.output.join('\n'),env:this.env,types:this.types};
   }
-  tokenize(lines){return lines.map((raw,i)=>({raw,src:raw.replace(/\/\/.*$/,'').trim(),ln:i+1})).filter(l=>l.src.length>0);}
-  execBlock(lines,from,to){let i=from;while(i<to)i=this.execLine(lines,i,to);}
-  execLine(lines,i,to){
+  tokenize(lines){return lines.map((raw,i)=>({raw,src:raw.replace(/\/\/.*$/,'').trim().replace(/<-/g,'←'),ln:i+1})).filter(l=>l.src.length>0);}
+  async execBlock(lines,from,to){let i=from;while(i<to)i=await this.execLine(lines,i,to);}
+  async execLine(lines,i,to){
     const s=lines[i].src;
     if(/^DECLARE\s+/i.test(s)){
-      const m=s.match(/^DECLARE\s+(\w+)\s*(?::\s*(\w+(?:\[.*?\])?))?/i);
-      if(m){const name=m[1],type=m[2]||'',baseType=type.split('[')[0];
+      const m=s.match(/^DECLARE\s+((?:\w+\s*,\s*)*\w+)\s*(?::\s*(\w+(?:\[.*?\])?))?/i);
+      if(m){
+        const names=m[1].split(',').map(n=>n.trim()).filter(Boolean);
+        const type=m[2]||'',baseType=type.split('[')[0];
         if(type&&!['INTEGER','REAL','STRING','BOOLEAN','CHAR','DATE'].includes(baseType)&&baseType!=='ARRAY')
-          this.err('Unknown data type "'+type+'" in DECLARE '+name+' — expected INTEGER, REAL, STRING, BOOLEAN, CHAR, DATE, or ARRAY (case-sensitive)');
-        this.types[name]=type||'UNKNOWN';
-        if(!(name in this.env)){if(type==='INTEGER'||type==='REAL')this.env[name]=0;else if(type==='STRING')this.env[name]='';else if(type==='BOOLEAN')this.env[name]=false;else if(type.startsWith('ARRAY'))this.env[name]={};else this.env[name]=null;}}
+          this.err('Unknown data type "'+type+'" in DECLARE '+names.join(', ')+' — expected INTEGER, REAL, STRING, BOOLEAN, CHAR, DATE, or ARRAY (case-sensitive)');
+        for(const name of names){
+          this.types[name]=type||'UNKNOWN';
+          if(!(name in this.env)){if(type==='INTEGER'||type==='REAL')this.env[name]=0;else if(type==='STRING')this.env[name]='';else if(type==='BOOLEAN')this.env[name]=false;else if(type.startsWith('ARRAY'))this.env[name]={};else this.env[name]=null;}
+        }
+      }
       return i+1;}
-    if(/^CONSTANT\s+/i.test(s)){const m=s.match(/^CONSTANT\s+(\w+)\s*[=←]\s*(.+)/i);if(m)this.env[m[1]]=this.eval(m[2].trim());return i+1;}
-    if(/^OUTPUT\s+/i.test(s)){this.output.push(String(this.eval(s.replace(/^OUTPUT\s+/i,'').trim())));return i+1;}
+    if(/^CONSTANT\s+/i.test(s)){const m=s.match(/^CONSTANT\s+(\w+)\s*[=←]\s*(.+)/i);if(m)this.env[m[1]]=await this.eval(m[2].trim());return i+1;}
+    if(/^OUTPUT\s+/i.test(s)){
+      const rest=s.replace(/^OUTPUT\s+/i,'').trim();
+      const parts=this.splitTop(rest,',');
+      const vals=[];for(const p of parts)vals.push(String(await this.eval(p.trim())));
+      this.output.push(vals.join(''));
+      return i+1;}
     if(/^TYPE_CHECK\s+/i.test(s)){
       const vars=s.replace(/^TYPE_CHECK\s+/i,'').split(',').map(v=>v.trim()).filter(Boolean);
-      this.output.push('── TYPE_CHECK ──────────────────');
+      this.output.push('── TYPE_CHECK ────────────────────────');
       for(const vn of vars){const type=this.types[vn]||this._inferType(vn);const value=vn in this.env?this.env[vn]:'(undeclared)';const valStr=typeof value==='string'?'"'+value+'"':String(value);this.output.push('  '+vn+' : '+type+' = '+valStr);}
       this.output.push('────────────────────────────────');
       return i+1;}
     if(/^INPUT\s+/i.test(s)){
       const name=s.replace(/^INPUT\s+/i,'').trim();
-      const raw=this.inputValues.length>0?this.inputValues.shift():'';
+      const raw=await this.inputProvider(name);
       const type=this.types[name]||''; let val=raw;
       if((type==='INTEGER'||type==='REAL')&&raw!==''&&!isNaN(Number(raw)))val=type==='INTEGER'?parseInt(raw):parseFloat(raw);
       else if(type==='BOOLEAN')val=raw.toLowerCase()==='true';
-      this.env[name]=val; this.output.push('INPUT '+name+' \u2192 '+val); return i+1;}
+      this.env[name]=val; this.output.push('INPUT '+name+' → '+val); return i+1;}
     if(/^OPENFILE\s+/i.test(s)){
       const m=s.match(/^OPENFILE\s+(.+?)\s+FOR\s+(READ|WRITE|APPEND)\s*$/i);
-      if(!m)this.err('Invalid OPENFILE \u2014 expected OPENFILE <file> FOR READ|WRITE|APPEND');
-      const fname=String(this.eval(m[1].trim())),mode=m[2].toUpperCase();
+      if(!m)this.err('Invalid OPENFILE — expected OPENFILE <file> FOR READ|WRITE|APPEND');
+      const fname=String(await this.eval(m[1].trim())),mode=m[2].toUpperCase();
       if(mode==='WRITE')this.files[fname]={lines:[],readIndex:0,mode:'WRITE'};
       else if(mode==='APPEND'){if(!this.files[fname])this.files[fname]={lines:[],readIndex:0,mode:'APPEND'};else this.files[fname].mode='APPEND';}
-      else{if(!this.files[fname])this.err('File "'+fname+'" not found \u2014 cannot open for READ');this.files[fname].mode='READ';this.files[fname].readIndex=0;}
+      else{if(!this.files[fname])this.err('File "'+fname+'" not found — cannot open for READ');this.files[fname].mode='READ';this.files[fname].readIndex=0;}
       return i+1;}
     if(/^WRITEFILE\s+/i.test(s)){
       const rest=s.replace(/^WRITEFILE\s+/i,''),parts=this.splitTop(rest,',');
-      if(parts.length<2)this.err('Invalid WRITEFILE \u2014 expected WRITEFILE <file>, <data>');
-      const fname=String(this.eval(parts[0].trim())),f=this.files[fname];
+      if(parts.length<2)this.err('Invalid WRITEFILE — expected WRITEFILE <file>, <data>');
+      const fname=String(await this.eval(parts[0].trim())),f=this.files[fname];
       if(!f||(f.mode!=='WRITE'&&f.mode!=='APPEND'))this.err('File "'+fname+'" is not open for WRITE/APPEND');
-      f.lines.push(String(this.eval(parts.slice(1).join(',').trim())));
+      f.lines.push(String(await this.eval(parts.slice(1).join(',').trim())));
       return i+1;}
     if(/^READFILE\s+/i.test(s)){
       const rest=s.replace(/^READFILE\s+/i,''),parts=this.splitTop(rest,',');
-      if(parts.length<2)this.err('Invalid READFILE \u2014 expected READFILE <file>, <variable>');
-      const fname=String(this.eval(parts[0].trim())),varName=parts[1].trim(),f=this.files[fname];
+      if(parts.length<2)this.err('Invalid READFILE — expected READFILE <file>, <variable>');
+      const fname=String(await this.eval(parts[0].trim())),varName=parts[1].trim(),f=this.files[fname];
       if(!f||f.mode!=='READ')this.err('File "'+fname+'" is not open for READ');
-      if(f.readIndex>=f.lines.length)this.err('Attempted to READFILE past end of "'+fname+'" \u2014 check EOF('+fname+') first');
+      if(f.readIndex>=f.lines.length)this.err('Attempted to READFILE past end of "'+fname+'" — check EOF('+fname+') first');
       this.env[varName]=f.lines[f.readIndex++];
       return i+1;}
     if(/^CLOSEFILE\s+/i.test(s)){
-      const fname=String(this.eval(s.replace(/^CLOSEFILE\s+/i,'').trim()));
+      const fname=String(await this.eval(s.replace(/^CLOSEFILE\s+/i,'').trim()));
       if(this.files[fname])this.files[fname].mode='CLOSED';
       return i+1;}
-    if(/^CALL\s+/i.test(s)){this.callProc(s.replace(/^CALL\s+/i,'').trim());return i+1;}
-    if(/^RETURN\s+/i.test(s))throw{type:'return',value:this.eval(s.replace(/^RETURN\s+/i,'').trim())};
-    if(/^IF\s+/i.test(s))return this.execIf(lines,i,to);
-    if(/^FOR\s+/i.test(s))return this.execFor(lines,i,to);
-    if(/^WHILE\s+/i.test(s))return this.execWhile(lines,i,to);
-    if(/^REPEAT$/i.test(s))return this.execRepeat(lines,i,to);
-    if(/^CASE\s+OF\s+/i.test(s))return this.execCase(lines,i,to);
+    if(/^CALL\s+/i.test(s)){await this.callProc(s.replace(/^CALL\s+/i,'').trim());return i+1;}
+    if(/^RETURN\s+/i.test(s))throw{type:'return',value:await this.eval(s.replace(/^RETURN\s+/i,'').trim())};
+    if(/^IF\s+/i.test(s))return await this.execIf(lines,i,to);
+    if(/^FOR\s+/i.test(s))return await this.execFor(lines,i,to);
+    if(/^WHILE\s+/i.test(s))return await this.execWhile(lines,i,to);
+    if(/^REPEAT$/i.test(s))return await this.execRepeat(lines,i,to);
+    if(/^CASE\s+OF\s+/i.test(s))return await this.execCase(lines,i,to);
     if(/^PROCEDURE\s+/i.test(s))return this.collectProc(lines,i,to);
     if(/^FUNCTION\s+/i.test(s))return this.collectFunc(lines,i,to);
     if(/^(ENDIF|ENDWHILE|ENDCASE|NEXT|UNTIL|ELSE|THEN|ENDPROCEDURE|ENDFUNCTION|OTHERWISE|RETURNS)(\s|$)/i.test(s))return i+1;
     const am=s.match(/^([A-Za-z_]\w*(?:\[.+?\])?)\s*←\s*(.+)$/);
-    if(am){this.assign(am[1].trim(),am[2].trim());return i+1;}
-    if(/^[A-Za-z_]\w*\s*\(/.test(s)){this.callProc(s);return i+1;}
+    if(am){await this.assign(am[1].trim(),am[2].trim());return i+1;}
+    if(/^[A-Za-z_]\w*\s*\(/.test(s)){await this.callProc(s);return i+1;}
     return i+1;
   }
-  assign(lhs,rhs){
+  async assign(lhs,rhs){
     const m=lhs.match(/^(\w+)\[(.+)\]$/);
     if(m){
       const name=m[1];
       if(!(name in this.env))this.err('Variable "'+name+'" is not declared — use DECLARE before assigning to it');
-      const idx=this.idxKey(m[2]);
+      const idx=await this.idxKey(m[2]);
       if(typeof this.env[name]!=='object')this.env[name]={};
-      this.env[name][idx]=this.eval(rhs);
+      this.env[name][idx]=await this.eval(rhs);
     } else {
       if(!(lhs in this.env))this.err('Variable "'+lhs+'" is not declared — use DECLARE before assigning to it');
-      const val=this.eval(rhs);
+      const val=await this.eval(rhs);
       this.checkType(lhs,val);
       this.env[lhs]=val;
     }
@@ -887,46 +935,53 @@ class PseudoInterpreter {
     if(type==='BOOLEAN'&&typeof val!=='boolean')
       this.err('Type mismatch: cannot assign '+JSON.stringify(val)+' to BOOLEAN variable "'+name+'"');
   }
-  idxKey(s){return this.splitTop(s,',').map(p=>this.eval(p.trim())).join(',');}
-  execIf(lines,i,to){
+  async idxKey(s){const parts=this.splitTop(s,',');const vals=[];for(const p of parts)vals.push(await this.eval(p.trim()));return vals.join(',');}
+  async execIf(lines,i,to){
     const condStr=lines[i].src.replace(/^IF\s+/i,'').replace(/\s+THEN\s*$/i,'').trim();
     let depth=0,thenIdx=-1,elseIdx=-1,endIdx=-1;
     for(let j=i;j<to;j++){const u=lines[j].src.toUpperCase();if(/^IF\s+/.test(u))depth++;if(depth===1&&/\bTHEN\b/.test(u)&&thenIdx<0)thenIdx=j;if(depth===1&&/^ELSE$/.test(u)&&elseIdx<0)elseIdx=j;if(/^ENDIF/.test(u)){depth--;if(depth===0){endIdx=j;break;}}}
     if(endIdx<0)this.err('Missing ENDIF');
     const tS=thenIdx>=0?thenIdx+1:i+1,tE=elseIdx>=0?elseIdx:endIdx;
     const eS=elseIdx>=0?elseIdx+1:endIdx,eE=endIdx;
-    if(this.eval(condStr))this.execBlock(lines,tS,tE);else this.execBlock(lines,eS,eE);
+    if(await this.eval(condStr))await this.execBlock(lines,tS,tE);else await this.execBlock(lines,eS,eE);
     return endIdx+1;}
-  execFor(lines,i,to){
+  async execFor(lines,i,to){
     const m=lines[i].src.match(/^FOR\s+(\w+)\s*←\s*(.+?)\s+TO\s+(.+?)(?:\s+STEP\s+(.+))?$/i);
-    if(!m)this.err('Invalid FOR');const vn=m[1],stop=Number(this.eval(m[3])),step=m[4]?Number(this.eval(m[4])):1;
+    if(!m)this.err('Invalid FOR');const vn=m[1],stop=Number(await this.eval(m[3])),step=m[4]?Number(await this.eval(m[4])):1;
     let depth=0,nextIdx=-1;
     for(let j=i;j<to;j++){if(/^FOR\s+/i.test(lines[j].src))depth++;if(/^NEXT\s+/i.test(lines[j].src)){depth--;if(depth===0){nextIdx=j;break;}}}
     if(nextIdx<0)this.err('Missing NEXT');
-    this.env[vn]=Number(this.eval(m[2]));let iter=0;
-    while((step>0?this.env[vn]<=stop:this.env[vn]>=stop)&&iter++<10000){this.execBlock(lines,i+1,nextIdx);this.env[vn]=Number(this.env[vn])+step;}
+    this.env[vn]=Number(await this.eval(m[2]));let iter=0;
+    while((step>0?this.env[vn]<=stop:this.env[vn]>=stop)&&iter++<10000){await this.execBlock(lines,i+1,nextIdx);this.env[vn]=Number(this.env[vn])+step;}
     if(iter>=10000)this.output.push('⚠ FOR loop stopped after 10000 iterations (possible infinite loop — check STEP/TO values)');
     return nextIdx+1;}
-  execWhile(lines,i,to){
+  async execWhile(lines,i,to){
     const condStr=lines[i].src.replace(/^WHILE\s+/i,'').trim();let depth=0,endIdx=-1;
     for(let j=i;j<to;j++){if(/^WHILE\s+/i.test(lines[j].src))depth++;if(/^ENDWHILE/i.test(lines[j].src)){depth--;if(depth===0){endIdx=j;break;}}}
     if(endIdx<0)this.err('Missing ENDWHILE');let iter=0;
-    while(this.eval(condStr)&&iter++<10000)this.execBlock(lines,i+1,endIdx);
+    while(await this.eval(condStr)&&iter++<10000)await this.execBlock(lines,i+1,endIdx);
     if(iter>=10000)this.output.push('⚠ WHILE loop stopped after 10000 iterations (possible infinite loop — check the condition)');
     return endIdx+1;}
-  execRepeat(lines,i,to){
+  async execRepeat(lines,i,to){
     let untilIdx=-1;for(let j=i+1;j<to;j++){if(/^UNTIL\s+/i.test(lines[j].src)){untilIdx=j;break;}}
     if(untilIdx<0)this.err('Missing UNTIL');const condStr=lines[untilIdx].src.replace(/^UNTIL\s+/i,'').trim();
-    let iter=0;do{this.execBlock(lines,i+1,untilIdx);iter++;}while(!this.eval(condStr)&&iter<10000);
+    let iter=0;do{await this.execBlock(lines,i+1,untilIdx);iter++;}while(!(await this.eval(condStr))&&iter<10000);
     if(iter>=10000)this.output.push('⚠ REPEAT loop stopped after 10000 iterations (possible infinite loop — check the UNTIL condition)');
     return untilIdx+1;}
-  execCase(lines,i,to){
-    const val=this.eval(lines[i].src.replace(/^CASE\s+OF\s+/i,'').trim());let endIdx=-1;
+  async execCase(lines,i,to){
+    const val=await this.eval(lines[i].src.replace(/^CASE\s+OF\s+/i,'').trim());let endIdx=-1;
     for(let j=i+1;j<to;j++){if(/^ENDCASE/i.test(lines[j].src)){endIdx=j;break;}}
     if(endIdx<0)this.err('Missing ENDCASE');let matched=false;
-    for(let j=i+1;j<endIdx&&!matched;j++){const s=lines[j].src;if(/^OTHERWISE\s*:/i.test(s)){const body=s.replace(/^OTHERWISE\s*:\s*/i,'').trim();if(body)this.execOneLiner(body);matched=true;}else{const cm=s.match(/^(.+?)\s*:\s*(.*)/);if(cm&&this.eval(cm[1].trim())==val){if(cm[2].trim())this.execOneLiner(cm[2].trim());matched=true;}}}
+    for(let j=i+1;j<endIdx&&!matched;j++){const s=lines[j].src;if(/^OTHERWISE\s*:/i.test(s)){const body=s.replace(/^OTHERWISE\s*:\s*/i,'').trim();if(body)await this.execOneLiner(body);matched=true;}else{const cm=s.match(/^(.+?)\s*:\s*(.*)/);if(cm&&(await this.eval(cm[1].trim()))==val){if(cm[2].trim())await this.execOneLiner(cm[2].trim());matched=true;}}}
     return endIdx+1;}
-  execOneLiner(src){if(/^OUTPUT\s+/i.test(src))this.output.push(String(this.eval(src.replace(/^OUTPUT\s+/i,'').trim())));}
+  async execOneLiner(src){
+    if(/^OUTPUT\s+/i.test(src)){
+      const rest=src.replace(/^OUTPUT\s+/i,'').trim();
+      const parts=this.splitTop(rest,',');
+      const vals=[];for(const p of parts)vals.push(String(await this.eval(p.trim())));
+      this.output.push(vals.join(''));
+    }
+  }
   collectProc(lines,i,to){
     const m=lines[i].src.match(/^PROCEDURE\s+(\w+)\s*(?:\(([^)]*)\))?/i);if(!m)this.err('Invalid PROCEDURE');
     const name=m[1],params=m[2]?m[2].split(',').map(p=>p.trim().split(/\s*:\s*/)[0].trim()):[];
@@ -941,34 +996,36 @@ class PseudoInterpreter {
     for(let j=i;j<to;j++){if(/^FUNCTION\s+/i.test(lines[j].src))depth++;if(/^ENDFUNCTION/i.test(lines[j].src)){depth--;if(depth===0){endIdx=j;break;}}}
     if(endIdx<0)this.err('Missing ENDFUNCTION');
     this.functions[name]={params,body:lines.slice(i+1,endIdx)};this.output.push('[FUNCTION '+name+' defined]');return endIdx+1;}
-  callProc(callStr){
+  async callProc(callStr){
     const m=callStr.match(/^(\w+)\s*(?:\(([^)]*)\))?/);if(!m)return;
     const name=m[1],argStrs=m[2]?m[2].split(',').map(s=>s.trim()):[];
     const proc=this.procedures[name];if(!proc){this.output.push('[CALL '+name+' — not defined]');return;}
     const outerKeys=new Set(Object.keys(this.env));
-    const child=this.makeChild();proc.params.forEach((p,idx)=>{if(argStrs[idx]!==undefined)child.env[p]=this.eval(argStrs[idx]);});
-    try{child.execBlock(proc.body,0,proc.body.length);}catch(e){if(e.type!=='return')throw e;}
-    this.output.push(...child.output);this.inputValues=child.inputValues;
+    const child=this.makeChild();
+    for(let idx=0;idx<proc.params.length;idx++){if(argStrs[idx]!==undefined)child.env[proc.params[idx]]=await this.eval(argStrs[idx]);}
+    try{await child.execBlock(proc.body,0,proc.body.length);}catch(e){if(e.type!=='return')throw e;}
+    this.output.push(...child.output);
     for(const k of outerKeys)if(k in child.env)this.env[k]=child.env[k];}
-  callFunc(name,argStrs){
+  async callFunc(name,argStrs){
     const fn=this.functions[name];if(!fn)this.err('Function '+name+' not defined');
-    const child=this.makeChild();fn.params.forEach((p,idx)=>{if(argStrs[idx]!==undefined)child.env[p]=this.eval(argStrs[idx]);});
-    let ret=null;try{child.execBlock(fn.body,0,fn.body.length);}catch(e){if(e.type==='return')ret=e.value;else throw e;}
-    this.output.push(...child.output);this.inputValues=child.inputValues;return ret;}
-  makeChild(){const c=new PseudoInterpreter({});c.env=Object.assign({},this.env);c.types=Object.assign({},this.types);c.procedures=this.procedures;c.functions=this.functions;c.inputValues=this.inputValues;c.files=this.files;return c;}
-  eval(raw){
+    const child=this.makeChild();
+    for(let idx=0;idx<fn.params.length;idx++){if(argStrs[idx]!==undefined)child.env[fn.params[idx]]=await this.eval(argStrs[idx]);}
+    let ret=null;try{await child.execBlock(fn.body,0,fn.body.length);}catch(e){if(e.type==='return')ret=e.value;else throw e;}
+    this.output.push(...child.output);return ret;}
+  makeChild(){const c=new PseudoInterpreter({},this.inputProvider);c.env=Object.assign({},this.env);c.types=Object.assign({},this.types);c.procedures=this.procedures;c.functions=this.functions;c.files=this.files;return c;}
+  async eval(raw){
     const s=raw.trim();if(!s)return'';
-    const amp=this.splitTop(s,'&');if(amp.length>1)return amp.map(p=>String(this.eval(p.trim()))).join('');
+    const amp=this.splitTop(s,'&');if(amp.length>1){const vals=[];for(const p of amp)vals.push(String(await this.eval(p.trim())));return vals.join('');}
     if(s.toUpperCase()==='TRUE')return true;if(s.toUpperCase()==='FALSE')return false;
     if(/^"[^"]*"$/.test(s))return s.slice(1,-1);if(/^'[^']*'$/.test(s))return s.slice(1,-1);
-    if(/^NOT\s+/i.test(s))return!this.eval(s.replace(/^NOT\s+/i,''));
-    if(s[0]==='('&&this.matchParen(s)===s.length-1)return this.eval(s.slice(1,-1));
-    const or=this.splitTop(s,'OR');if(or.length>1)return or.reduce((a,p)=>a||this.eval(p.trim()),false);
-    const and=this.splitTop(s,'AND');if(and.length>1)return and.reduce((a,p)=>a&&this.eval(p.trim()),true);
-    for(const op of['<=','>=','<>','!=','=','<','>']){const idx=this.findTop(s,op);if(idx>=0){const L=this.eval(s.slice(0,idx).trim()),R=this.eval(s.slice(idx+op.length).trim());if(op==='<=')return L<=R;if(op==='>=')return L>=R;if(op==='<>'||op==='!=')return L!=R;if(op==='=')return L==R;if(op==='<')return L<R;if(op==='>') return L>R;}}
-    const as=this.findAddSub(s);if(as>=0){const op=s[as],L=this.eval(s.slice(0,as).trim()),R=this.eval(s.slice(as+1).trim());return op==='+'?(typeof L==='string'||typeof R==='string'?String(L)+String(R):Number(L)+Number(R)):Number(L)-Number(R);}
-    const md=this.findMul(s);if(md){const L=Number(this.eval(s.slice(0,md.idx).trim())),R=Number(this.eval(s.slice(md.idx+md.op.length).trim()));if(md.op==='*')return L*R;if(md.op==='/')return L/R;if(md.op==='MOD')return L%R;if(md.op==='DIV')return Math.trunc(L/R);}
-    if(s[0]==='-')return-Number(this.eval(s.slice(1)));
+    if(/^NOT\s+/i.test(s))return!(await this.eval(s.replace(/^NOT\s+/i,'')));
+    if(s[0]==='('&&this.matchParen(s)===s.length-1)return await this.eval(s.slice(1,-1));
+    const or=this.splitTop(s,'OR');if(or.length>1){let acc=false;for(const p of or)acc=acc||(await this.eval(p.trim()));return acc;}
+    const and=this.splitTop(s,'AND');if(and.length>1){let acc=true;for(const p of and)acc=acc&&(await this.eval(p.trim()));return acc;}
+    for(const op of['<=','>=','<>','!=','=','<','>']){const idx=this.findTop(s,op);if(idx>=0){const L=await this.eval(s.slice(0,idx).trim()),R=await this.eval(s.slice(idx+op.length).trim());if(op==='<=')return L<=R;if(op==='>=')return L>=R;if(op==='<>'||op==='!=')return L!=R;if(op==='=')return L==R;if(op==='<')return L<R;if(op==='>') return L>R;}}
+    const as=this.findAddSub(s);if(as>=0){const op=s[as],L=await this.eval(s.slice(0,as).trim()),R=await this.eval(s.slice(as+1).trim());return op==='+'?(typeof L==='string'||typeof R==='string'?String(L)+String(R):Number(L)+Number(R)):Number(L)-Number(R);}
+    const md=this.findMul(s);if(md){const L=Number(await this.eval(s.slice(0,md.idx).trim())),R=Number(await this.eval(s.slice(md.idx+md.op.length).trim()));if(md.op==='*')return L*R;if(md.op==='/')return L/R;if(md.op==='MOD')return L%R;if(md.op==='DIV')return Math.trunc(L/R);}
+    if(s[0]==='-')return-Number(await this.eval(s.slice(1)));
     if(/^-?\d+(\.\d+)?$/.test(s))return Number(s);
     const fm=s.match(/^(\w+)\s*\(/);
     const fmOpenIdx=fm?fm[0].length-1:-1;
@@ -977,40 +1034,40 @@ class PseudoInterpreter {
       const fname=fm[1],argsStr=s.slice(fmOpenIdx+1,s.length-1);
       const args=argsStr.trim()?this.splitTop(argsStr,',').map(a=>a.trim()):[];
       switch(fname.toUpperCase()){
-        case'LENGTH':case'LEN':return String(this.eval(args[0])).length;
-        case'UCASE':case'UPPER':return String(this.eval(args[0])).toUpperCase();
-        case'LCASE':case'LOWER':return String(this.eval(args[0])).toLowerCase();
-        case'SUBSTR':case'MID':case'SUBSTRING':{const st=String(this.eval(args[0])),fr=Number(this.eval(args[1]))-1,ln=args[2]?Number(this.eval(args[2])):undefined;return ln!==undefined?st.substr(fr,ln):st.substr(fr);}
-        case'LEFT':return String(this.eval(args[0])).slice(0,Number(this.eval(args[1])));
-        case'RIGHT':{const st=String(this.eval(args[0]));return st.slice(st.length-Number(this.eval(args[1])));}
-        case'INT':return Math.trunc(Number(this.eval(args[0])));
-        case'ROUND':{const places=args[1]!==undefined?Number(this.eval(args[1])):0,factor=Math.pow(10,places);return Math.round(Number(this.eval(args[0]))*factor)/factor;}
-        case'REAL':return parseFloat(this.eval(args[0]));
-        case'STR':case'NUM_TO_STR':return String(this.eval(args[0]));
-        case'NUM':case'STR_TO_NUM':return Number(this.eval(args[0]));
-        case'ABS':return Math.abs(Number(this.eval(args[0])));
-        case'SQRT':return Math.sqrt(Number(this.eval(args[0])));
+        case'LENGTH':case'LEN':return String(await this.eval(args[0])).length;
+        case'UCASE':case'UPPER':return String(await this.eval(args[0])).toUpperCase();
+        case'LCASE':case'LOWER':return String(await this.eval(args[0])).toLowerCase();
+        case'SUBSTR':case'MID':case'SUBSTRING':{const st=String(await this.eval(args[0])),fr=Number(await this.eval(args[1]))-1,ln=args[2]?Number(await this.eval(args[2])):undefined;return ln!==undefined?st.substr(fr,ln):st.substr(fr);}
+        case'LEFT':return String(await this.eval(args[0])).slice(0,Number(await this.eval(args[1])));
+        case'RIGHT':{const st=String(await this.eval(args[0]));return st.slice(st.length-Number(await this.eval(args[1])));}
+        case'INT':return Math.trunc(Number(await this.eval(args[0])));
+        case'ROUND':{const places=args[1]!==undefined?Number(await this.eval(args[1])):0,factor=Math.pow(10,places);return Math.round(Number(await this.eval(args[0]))*factor)/factor;}
+        case'REAL':return parseFloat(await this.eval(args[0]));
+        case'STR':case'NUM_TO_STR':return String(await this.eval(args[0]));
+        case'NUM':case'STR_TO_NUM':return Number(await this.eval(args[0]));
+        case'ABS':return Math.abs(Number(await this.eval(args[0])));
+        case'SQRT':return Math.sqrt(Number(await this.eval(args[0])));
         case'RANDOM':return Math.random();
-        case'ASC':return String(this.eval(args[0])).charCodeAt(0);
-        case'CHR':return String.fromCharCode(Number(this.eval(args[0])));
-        case'MOD':return Number(this.eval(args[0]))%Number(this.eval(args[1]));
-        case'DIV':return Math.trunc(Number(this.eval(args[0]))/Number(this.eval(args[1])));
-        case'EOF':{const fname=String(this.eval(args[0])),f=this.files[fname];return!f||f.readIndex>=f.lines.length;}
+        case'ASC':return String(await this.eval(args[0])).charCodeAt(0);
+        case'CHR':return String.fromCharCode(Number(await this.eval(args[0])));
+        case'MOD':return Number(await this.eval(args[0]))%Number(await this.eval(args[1]));
+        case'DIV':return Math.trunc(Number(await this.eval(args[0]))/Number(await this.eval(args[1])));
+        case'EOF':{const fname=String(await this.eval(args[0])),f=this.files[fname];return!f||f.readIndex>=f.lines.length;}
         case'TYPEOF':{const vn=args[0]?.trim();if(vn in this.types&&this.types[vn])return this.types[vn];return this._inferType(vn);}
-        case'ISINTEGER':case'IS_INTEGER':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t==='INTEGER')return true;if(t)return false;const v=this.eval(vn);return typeof v==='number'&&Number.isInteger(v);}
-        case'ISREAL':case'IS_REAL':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t==='REAL')return true;if(t)return false;return typeof this.eval(vn)==='number';}
-        case'ISSTRING':case'IS_STRING':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t==='STRING')return true;if(t)return false;return typeof this.eval(vn)==='string';}
-        case'ISBOOLEAN':case'IS_BOOLEAN':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t==='BOOLEAN')return true;if(t)return false;return typeof this.eval(vn)==='boolean';}
-        case'ISARRAY':case'IS_ARRAY':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t.startsWith('ARRAY'))return true;if(t)return false;return typeof this.eval(vn)==='object';}
-        case'ISNUMERIC':case'IS_NUMERIC':{const v=String(this.eval(args[0]?.trim()));return v.trim()!==''&&!isNaN(Number(v));}
+        case'ISINTEGER':case'IS_INTEGER':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t==='INTEGER')return true;if(t)return false;const v=await this.eval(vn);return typeof v==='number'&&Number.isInteger(v);}
+        case'ISREAL':case'IS_REAL':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t==='REAL')return true;if(t)return false;return typeof(await this.eval(vn))==='number';}
+        case'ISSTRING':case'IS_STRING':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t==='STRING')return true;if(t)return false;return typeof(await this.eval(vn))==='string';}
+        case'ISBOOLEAN':case'IS_BOOLEAN':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t==='BOOLEAN')return true;if(t)return false;return typeof(await this.eval(vn))==='boolean';}
+        case'ISARRAY':case'IS_ARRAY':{const vn=args[0]?.trim();const t=this.types[vn]||'';if(t.startsWith('ARRAY'))return true;if(t)return false;return typeof(await this.eval(vn))==='object';}
+        case'ISNUMERIC':case'IS_NUMERIC':{const v=String(await this.eval(args[0]?.trim()));return v.trim()!==''&&!isNaN(Number(v));}
       }
-      if(this.functions[fname])return this.callFunc(fname,args);return 0;}
-    const arrm=s.match(/^(\w+)\[(.+)\]$/);if(arrm){if(!(arrm[1] in this.env))this.err('Variable "'+arrm[1]+'" is not declared');const arr=this.env[arrm[1]];return(arr&&typeof arr==='object')?(arr[this.idxKey(arrm[2])]??0):0;}
+      if(this.functions[fname])return await this.callFunc(fname,args);return 0;}
+    const arrm=s.match(/^(\w+)\[(.+)\]$/);if(arrm){if(!(arrm[1] in this.env))this.err('Variable "'+arrm[1]+'" is not declared');const arr=this.env[arrm[1]];return(arr&&typeof arr==='object')?(arr[await this.idxKey(arrm[2])]??0):0;}
     if(/^[A-Za-z_]\w*$/.test(s)){if(s in this.env)return this.env[s];this.err('Variable "'+s+'" is not declared');}
     if(s[0]==='"'||s[0]==="'")this.err('Malformed string literal '+s+' — strings must start and end with matching " or \' quotes');
     return s;}
   matchParen(s){let d=0;for(let i=0;i<s.length;i++){if(s[i]==='(')d++;if(s[i]===')')d--;if(d===0)return i;}return-1;}
-  splitTop(s,op){const isKw=/^[A-Z]+$/.test(op);const parts=[];let depth=0,inStr=false,strCh='',buf='',i=0;while(i<s.length){const ch=s[i];if(inStr){buf+=ch;if(ch===strCh)inStr=false;i++;continue;}if(ch==='"'||ch==="'"){inStr=true;strCh=ch;buf+=ch;i++;continue;}if(ch==='('){depth++;buf+=ch;i++;continue;}if(ch===')'){depth--;buf+=ch;i++;continue;}if(depth===0){if(!isKw&&s.startsWith(op,i)){parts.push(buf);buf='';i+=op.length;continue;}if(isKw){const rest=s.slice(i);const m=rest.match(new RegExp('^'+op+'\\b','i'));if(m){parts.push(buf);buf='';i+=m[0].length;continue;}}}buf+=ch;i++;}parts.push(buf);return parts;}
+  splitTop(s,op){const isKw=/^[A-Z]+$/.test(op);const parts=[];let depth=0,inStr=false,strCh='',buf='',i=0;while(i<s.length){const ch=s[i];if(inStr){buf+=ch;if(ch===strCh)inStr=false;i++;continue;}if(ch==='"'||ch==="'"){inStr=true;strCh=ch;buf+=ch;i++;continue;}if(ch==='('||ch==='['){depth++;buf+=ch;i++;continue;}if(ch===')'||ch===']'){depth--;buf+=ch;i++;continue;}if(depth===0){if(!isKw&&s.startsWith(op,i)){parts.push(buf);buf='';i+=op.length;continue;}if(isKw){const rest=s.slice(i);const m=rest.match(new RegExp('^'+op+'\\\\b','i'));if(m){parts.push(buf);buf='';i+=m[0].length;continue;}}}buf+=ch;i++;}parts.push(buf);return parts;}
   findTop(s,op){let depth=0,inStr=false,strCh='';for(let i=0;i<s.length;i++){const ch=s[i];if(inStr){if(ch===strCh)inStr=false;continue;}if(ch==='"'||ch==="'"){inStr=true;strCh=ch;continue;}if(ch==='(')depth++;if(ch===')')depth--;if(depth===0&&s.startsWith(op,i))return i;}return-1;}
   findAddSub(s){let depth=0,inStr=false;for(let i=s.length-1;i>=0;i--){const ch=s[i];if(ch===')'||ch===']')depth++;if(ch==='('||ch==='[')depth--;if(ch==='"'||ch==="'")inStr=!inStr;if(!inStr&&depth===0&&(ch==='+'||ch==='-')){let j=i-1;while(j>=0&&/\s/.test(s[j]))j--;if(j>=0&&/[\w\)\]"']/.test(s[j]))return i;}}return-1;}
   findMul(s){let depth=0,inStr=false;for(let i=s.length-1;i>=0;i--){const ch=s[i];if(ch===')')depth++;if(ch==='(')depth--;if(ch==='"'||ch==="'")inStr=!inStr;if(!inStr&&depth===0){if(ch==='*'||ch==='/')return{idx:i,op:ch};for(const kw of['MOD','DIV']){const start=i-kw.length+1;if(start>=0&&s.slice(start,i+1).toUpperCase()===kw){const before=start-1,after=i+1;if(!((before<0||/\W/.test(s[before]))&&(after>=s.length||/\W/.test(s[after]))))continue;let pb=before;while(pb>=0&&/\s/.test(s[pb]))pb--;if(!(pb>=0&&/[\w\)\]"']/.test(s[pb])))continue;return{idx:start,op:kw};}}}}return null;}
@@ -1026,17 +1083,17 @@ async function runCell(id){
   const outEl=document.getElementById('out-'+id);
   const btn=document.getElementById('btn-run-'+id)||document.querySelector('#cell-'+id+' .btn-run');
   const tag=document.getElementById('tag-'+id);
-  if(btn)btn.disabled=true;if(tag)tag.textContent='waiting...';outEl.className='output-panel';
-  const inputValues=await collectInputs(code);
+  if(btn)btn.disabled=true;outEl.className='output-panel';
   outEl.className='output-panel on';outEl.innerHTML='<div class="out-loading"><div class="spinner"></div> Running...</div>';
   if(tag)tag.textContent='running...';await new Promise(r=>setTimeout(r,30));
+  let promptCount=0;
+  const liveInputProvider=async(varName)=>{promptCount++;return await promptInput(varName,promptCount);};
   try{
-    const interp=new PseudoInterpreter(notebookState);
-    interp.inputValues=inputValues;
+    const interp=new PseudoInterpreter(notebookState,liveInputProvider);
     interp.procedures=Object.assign({},window._globalProcs);
     interp.functions=Object.assign({},window._globalFuncs);
     interp.files=Object.assign({},window._globalFiles);
-    const result=interp.run(code);
+    const result=await interp.run(code);
     for(const[name,value]of Object.entries(result.env)){
       if(name in interp.types||name in notebookState)
         notebookState[name]={type:result.types[name]||(notebookState[name]?notebookState[name].type:'UNKNOWN'),value,cellId:id};
@@ -1068,7 +1125,7 @@ function newNotebook(){
   window._globalProcs={}; window._globalFuncs={}; window._globalFiles={}; window._currentNotebookId=null;
   document.getElementById('cells-container').innerHTML=''; cells.length=0; window._cellIdCounter=0;
   document.getElementById('nb-title').value='Untitled Notebook';
-  EXAMPLES.forEach(code=>addCell(code));
+  addCell();
   closeDrawer(); refreshStatePanel();
 }
 
