@@ -21,6 +21,17 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+
+<!-- ═══ SECURITY: Content Security Policy ═══════════════════════════════════
+     Locks the page down to a minimal allow-list of origins. The critical
+     directive is connect-src: even if markup injection ever occurred, stolen
+     data could not be sent anywhere outside Google/esm.sh.
+     'unsafe-inline' is required because this app is a single self-contained
+     file (inline script blocks + onclick attributes).
+     Note: frame-ancestors is ignored in a <meta> CSP and GitHub Pages cannot
+     set HTTP headers, so clickjacking protection is not available here.     -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' https://www.gstatic.com https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.googleusercontent.com; connect-src 'self' https://esm.sh https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://pseudocode-notebook.firebaseapp.com; frame-src https://pseudocode-notebook.firebaseapp.com https://accounts.google.com; base-uri 'none'; form-action 'none'; object-src 'none'"/>
+<meta name="referrer" content="strict-origin-when-cross-origin"/>
 <title>PseudoLab — Cambridge Pseudocode Notebook</title>
 <script>
 (function(){
@@ -86,12 +97,23 @@ async function doSave(silent) {
   if (!user) { if (!silent) alert('Please sign in first.'); return false; }
   if (silent && !window._currentNotebookId) return false;
 
-  const title    = document.getElementById('nb-title')?.value || 'Untitled';
+  // Limits mirror firestore.rules so a rejected write is explained, not silent.
+  const MAX_TITLE = 200, MAX_CELLS = 300, MAX_CHARS = 400000;
+  const title    = (document.getElementById('nb-title')?.value || 'Untitled').slice(0, MAX_TITLE);
+  if (window._cells.length > MAX_CELLS) {
+    if (!silent) alert('Too many cells to save (limit ' + MAX_CELLS + ').');
+    return false;
+  }
   const cellData = window._cells.map(c => ({
     id: c.id, code: window._getCode(c.id),
-    output: document.getElementById('out-'+c.id)?.textContent || '',
+    output: (document.getElementById('out-'+c.id)?.textContent || '').slice(0, 20000),
     hasOutput: document.getElementById('out-'+c.id)?.classList.contains('on') || false
   }));
+  const totalChars = cellData.reduce((n, c) => n + c.code.length + c.output.length, 0);
+  if (totalChars > MAX_CHARS) {
+    if (!silent) alert('Notebook is too large to save (limit ' + MAX_CHARS + ' characters).');
+    return false;
+  }
 
   const notebookId = window._currentNotebookId || ('nb_' + Date.now());
   window._currentNotebookId = notebookId;
@@ -131,13 +153,30 @@ window.loadNotebookList = async () => {
     const div  = document.createElement('div');
     div.className = 'nb-list-item';
     const d = data.updatedAt?.toDate ? data.updatedAt.toDate().toLocaleDateString() : '—';
-    div.innerHTML =
-      '<div class="nb-list-title">' + (data.title || 'Untitled') + '</div>' +
-      '<div class="nb-list-date">' + d + '</div>' +
-      '<div class="nb-list-actions">' +
-        '<button class="btn-nb-open" onclick="fbOpen(\'' + docSnap.id + '\')">Open</button>' +
-        '<button class="btn-nb-del"  onclick="fbDelete(\'' + docSnap.id + '\')">✕</button>' +
-      '</div>';
+
+    // Titles are stored data: set them as text, never as markup, or a title
+    // like <img src=x onerror=...> would execute every time this list opens.
+    const titleEl = document.createElement('div');
+    titleEl.className = 'nb-list-title';
+    titleEl.textContent = typeof data.title === 'string' && data.title ? data.title : 'Untitled';
+
+    const dateEl = document.createElement('div');
+    dateEl.className = 'nb-list-date';
+    dateEl.textContent = d;
+
+    const actions = document.createElement('div');
+    actions.className = 'nb-list-actions';
+    const openBtn = document.createElement('button');
+    openBtn.className = 'btn-nb-open';
+    openBtn.textContent = 'Open';
+    openBtn.addEventListener('click', () => fbOpen(docSnap.id));
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn-nb-del';
+    delBtn.textContent = '✕';
+    delBtn.addEventListener('click', () => fbDelete(docSnap.id));
+    actions.appendChild(openBtn); actions.appendChild(delBtn);
+
+    div.appendChild(titleEl); div.appendChild(dateEl); div.appendChild(actions);
     list.appendChild(div);
   });
 };
@@ -149,10 +188,11 @@ window.fbOpen = async (notebookId) => {
   const ref  = doc(db, 'notebooks', user.uid, 'saved', notebookId);
   const snap = await getDoc(ref);
   if (!snap.exists()) { alert('Notebook not found.'); return; }
-  const data = snap.data();
-  if (!confirm('Open "' + (data.title||'Untitled') + '"? This replaces the current notebook.')) return;
+  const data = snap.data() || {};
+  const safeTitle = typeof data.title === 'string' ? data.title.slice(0, 200) : 'Untitled';
+  if (!confirm('Open "' + safeTitle + '"? This replaces the current notebook.')) return;
 
-  window._notebookState = data.sharedState || {};
+  window._notebookState = sanitizeSharedState(data.sharedState);
   window._executionCounter = 0;
   window._globalProcs = {}; window._globalFuncs = {}; window._globalFiles = {}; window._globalClasses = {};
   window._currentNotebookId = notebookId;
@@ -160,28 +200,56 @@ window.fbOpen = async (notebookId) => {
   document.getElementById('cells-container').innerHTML = '';
   window._cells.length = 0; window._cellIdCounter = 0;
   const titleEl = document.getElementById('nb-title');
-  if (titleEl && data.title) titleEl.value = data.title;
+  if (titleEl) titleEl.value = safeTitle;
 
-  for (const cd of (data.cells || [])) {
-    window._addCell(cd.code || '');
+  const cellList = Array.isArray(data.cells) ? data.cells.slice(0, 300) : [];
+  for (const cd of cellList) {
+    if (!cd || typeof cd !== 'object') continue;
+    const code   = typeof cd.code   === 'string' ? cd.code   : '';
+    const output = typeof cd.output === 'string' ? cd.output : '';
+    window._addCell(code);
     const newId = window._cellIdCounter;
-    if (cd.hasOutput && cd.output) {
+    if (cd.hasOutput && output) {
       setTimeout(() => {
         const el = document.getElementById('out-'+newId);
-        if (el) { el.textContent = cd.output; el.className = 'output-panel on'; window._executionCounter++; const t = document.getElementById('tag-'+newId); if(t) t.textContent='run #'+window._executionCounter; }
+        if (el) { el.textContent = output; el.className = 'output-panel on'; window._executionCounter++; const t = document.getElementById('tag-'+newId); if(t) t.textContent='run #'+window._executionCounter; }
       }, 300);
     }
   }
   window._refreshStatePanel();
   if (window._saveLocalNotebook) window._saveLocalNotebook();
   document.getElementById('nb-drawer').classList.remove('open');
-  showToast('📂 Opened "' + (data.title||'Untitled') + '"', '#3b6fce');
+  showToast('📂 Opened "' + safeTitle + '"', '#3b6fce');
 };
+
+// ── Validate stored variable state before trusting it ────────────────
+// Rebuilds the object from scratch, dropping prototype-polluting keys and
+// any entry that is not the {type, value, cellId} shape the app expects.
+function sanitizeSharedState(raw) {
+  const clean = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return clean;
+  const BAD = ['__proto__', 'constructor', 'prototype'];
+  for (const key of Object.keys(raw)) {
+    if (BAD.includes(key) || key.length > 100) continue;
+    const info = raw[key];
+    if (!info || typeof info !== 'object' || Array.isArray(info)) continue;
+    const v = info.value;
+    const ok = v === null || ['string', 'number', 'boolean', 'object'].includes(typeof v);
+    if (!ok) continue;
+    clean[key] = {
+      type:   typeof info.type === 'string' ? info.type : 'UNKNOWN',
+      value:  v,
+      cellId: typeof info.cellId === 'number' ? info.cellId : 0
+    };
+  }
+  return clean;
+}
 
 // ── Delete a saved notebook ──────────────────────────
 window.fbDelete = async (notebookId) => {
-  if (!confirm('Delete this notebook? Cannot be undone.')) return;
   const user = window._fbUser;
+  if (!user) { alert('Please sign in first.'); return; }
+  if (!confirm('Delete this notebook? Cannot be undone.')) return;
   await deleteDoc(doc(db, 'notebooks', user.uid, 'saved', notebookId));
   loadNotebookList();
   showToast('🗑 Deleted', '#e11d48');
@@ -216,13 +284,25 @@ window.showToast = showToast;
 
 <!-- CodeMirror 6 via ESM -->
 <script type="module" id="cm-loader">
+// Every import below is pinned to an exact version (supply-chain hardening),
+// AND every package's transitive dependencies are forced to those same exact
+// versions via esm.sh's `?deps=` param. Without the second part, pinning only
+// the top-level imports still breaks: each package also carries its own
+// semver-range import of @codemirror/state/view/language internally, and the
+// moment upstream publishes a new patch, esm.sh resolves that internal range
+// to a *different* module instance than the one we pinned directly — two
+// copies of @codemirror/state loaded at once — which fails CodeMirror's
+// internal instanceof/identity checks and made the editor box vanish
+// entirely with no visible error path. `?deps=` collapses everyone back onto
+// one shared instance per package, verified by comparing esm.sh's resolved
+// backing-file paths for every combination below.
 import { EditorView, keymap, highlightActiveLine, lineNumbers, highlightActiveLineGutter, drawSelection }
-  from 'https://esm.sh/@codemirror/view@6';
-import { EditorState } from 'https://esm.sh/@codemirror/state@6';
-import { defaultKeymap, indentWithTab, history, historyKeymap } from 'https://esm.sh/@codemirror/commands@6';
-import { syntaxHighlighting, HighlightStyle, StreamLanguage } from 'https://esm.sh/@codemirror/language@6';
-import { tags } from 'https://esm.sh/@lezer/highlight@1';
-import { autocompletion, completionKeymap } from 'https://esm.sh/@codemirror/autocomplete@6';
+  from 'https://esm.sh/@codemirror/view@6.43.11?deps=@codemirror/state@6.7.2';
+import { EditorState } from 'https://esm.sh/@codemirror/state@6.7.2';
+import { defaultKeymap, indentWithTab, history, historyKeymap } from 'https://esm.sh/@codemirror/commands@6.11.0?deps=@codemirror/state@6.7.2,@codemirror/view@6.43.11,@codemirror/language@6.12.4,@lezer/common@1.5.2';
+import { syntaxHighlighting, HighlightStyle, StreamLanguage } from 'https://esm.sh/@codemirror/language@6.12.4?deps=@codemirror/state@6.7.2,@codemirror/view@6.43.11,@lezer/common@1.5.2';
+import { tags } from 'https://esm.sh/@lezer/highlight@1.2.3?deps=@lezer/common@1.5.2';
+import { autocompletion, completionKeymap } from 'https://esm.sh/@codemirror/autocomplete@6.20.3?deps=@codemirror/state@6.7.2,@codemirror/view@6.43.11,@codemirror/language@6.12.4,@lezer/common@1.5.2';
 
 const KEYWORDS = ['DECLARE','CONSTANT','INPUT','OUTPUT','RETURN','RETURNS','CALL',
   'IF','THEN','ELSE','ENDIF','CASE','OF','OTHERWISE','ENDCASE',
@@ -735,9 +815,10 @@ window._globalClasses    = {};
 window._currentNotebookId = null;
 let studentMode = false;
 
-// Aliases for internal use
+// Alias for internal use. Note: there is deliberately NO alias for the shared
+// variable state — fbOpen() replaces window._notebookState with a whole new
+// object, so anything holding a second reference would keep the stale one.
 const cells            = window._cells;
-let notebookState      = window._notebookState;
 
 // ═══════════════════════════════════════════
 //  LOCAL AUTOSAVE (survives page refresh — no sign-in needed)
@@ -766,8 +847,10 @@ function restoreLocalNotebook() {
   let data; try { data = JSON.parse(raw); } catch(e) { return false; }
   if (!data || !Array.isArray(data.cells) || data.cells.length === 0) return false;
   const titleEl = document.getElementById('nb-title');
-  if (titleEl && data.title) titleEl.value = data.title;
-  data.cells.forEach(cd => addCell(cd.code || ''));
+  if (titleEl && typeof data.title === 'string' && data.title) titleEl.value = data.title.slice(0, 200);
+  data.cells.slice(0, 300).forEach(cd => {
+    addCell(cd && typeof cd.code === 'string' ? cd.code : '');
+  });
   return true;
 }
 window.addEventListener('beforeunload', saveLocalNotebook);
@@ -812,8 +895,7 @@ window.addEventListener('DOMContentLoaded', () => {
 //  SHARED STATE PANEL
 // ═══════════════════════════════════════════
 function refreshStatePanel() {
-  window._notebookState = notebookState;
-  const entries = Object.entries(notebookState);
+  const entries = Object.entries(window._notebookState);
   document.getElementById('state-count').textContent  = entries.length + ' var' + (entries.length!==1?'s':'');
   document.getElementById('state-status').textContent = 'Shared State: ' + entries.length + ' var' + (entries.length!==1?'s':'');
   const empty = document.getElementById('state-empty');
@@ -824,7 +906,9 @@ function refreshStatePanel() {
   for (const [name,info] of entries) {
     const val = typeof info.value==='string' ? '"'+info.value+'"' : String(info.value);
     const tr = document.createElement('tr');
-    tr.innerHTML='<td class="sv-name">'+name+'</td><td class="sv-type">'+info.type+'</td><td class="sv-val">'+val+'</td><td class="sv-type">Cell ['+info.cellId+']</td>';
+    // Names and values come from pseudocode the user typed — text, not markup.
+    [['sv-name',name],['sv-type',info.type],['sv-val',val],['sv-type','Cell ['+info.cellId+']']]
+      .forEach(([cls,text])=>{ const td=tr.insertCell(); td.className=cls; td.textContent=text; });
     tbody.appendChild(tr);
   }
   const body=document.getElementById('state-body');
@@ -834,7 +918,7 @@ window._refreshStatePanel = refreshStatePanel;
 
 function resetState() {
   if(!confirm('Reset all shared variable state?')) return;
-  notebookState={}; window._notebookState={}; window._executionCounter=0;
+  window._notebookState={}; window._executionCounter=0;
   window._globalProcs={}; window._globalFuncs={}; window._globalFiles={}; window._globalClasses={};
   refreshStatePanel();
   cells.forEach(c=>{const t=document.getElementById('tag-'+c.id);if(t)t.textContent='not run';});
@@ -930,8 +1014,11 @@ function promptInput(varName,count){
     document.getElementById('pseudo-modal')?.remove();
     const overlay=document.createElement('div');
     overlay.className='modal-overlay'; overlay.id='pseudo-modal';
-    overlay.innerHTML='<div class="modal-box"><div class="modal-lbl">INPUT required</div><div class="modal-var">'+varName+'</div><div class="modal-desc">Enter a value for <strong>'+varName+'</strong>:</div><input class="modal-field" id="modal-field" type="text" placeholder="type a value..." autocomplete="off"/><div class="modal-foot"><span class="modal-counter">Input #'+count+'</span><button class="btn-modal-stop" id="modal-stop" title="Stuck in an infinite loop? Stop execution.">⏹ Stop</button><button class="btn-modal-ok" id="modal-ok">OK ↵</button></div></div>';
+    overlay.innerHTML='<div class="modal-box"><div class="modal-lbl">INPUT required</div><div class="modal-var" id="modal-var"></div><div class="modal-desc">Enter a value for <strong id="modal-var2"></strong>:</div><input class="modal-field" id="modal-field" type="text" placeholder="type a value..." autocomplete="off"/><div class="modal-foot"><span class="modal-counter">Input #'+Number(count)+'</span><button class="btn-modal-stop" id="modal-stop" title="Stuck in an infinite loop? Stop execution.">⏹ Stop</button><button class="btn-modal-ok" id="modal-ok">OK ↵</button></div></div>';
     document.body.appendChild(overlay);
+    // varName is parsed out of user pseudocode — inject it as text, not markup.
+    overlay.querySelector('#modal-var').textContent  = varName;
+    overlay.querySelector('#modal-var2').textContent = varName;
     const field=document.getElementById('modal-field');
     const ok=document.getElementById('modal-ok');
     const stopBtn=document.getElementById('modal-stop');
@@ -969,16 +1056,43 @@ class PseudoInterpreter {
     }
     return{output:this.output.join('\n'),env:this.env,types:this.types};
   }
-  tokenize(lines){return lines.map((raw,i)=>({raw,src:raw.replace(/\/\/.*$/,'').trim().replace(/<-/g,'←'),ln:i+1})).filter(l=>l.src.length>0);}
+  // Strip // comments and normalise the <- arrow to ←, but only OUTSIDE string
+  // literals — so OUTPUT "http://example.com" and "a<-b" survive intact.
+  normalizeLine(line){
+    let out='',inStr=false,q='';
+    for(let i=0;i<line.length;i++){
+      const c=line[i];
+      if(inStr){out+=c;if(c===q)inStr=false;continue;}
+      if(c==='"'||c==="'"){inStr=true;q=c;out+=c;continue;}
+      if(c==='/'&&line[i+1]==='/')break;              // rest of the line is a comment
+      if(c==='<'&&line[i+1]==='-'){out+='←';i++;continue;}
+      out+=c;
+    }
+    return out;
+  }
+  tokenize(lines){return lines.map((raw,i)=>({raw,src:this.normalizeLine(raw).trim(),ln:i+1})).filter(l=>l.src.length>0);}
+  // Upper-case a built-in type name (keeping any [1:5] suffix); leave anything
+  // else — i.e. a class name — exactly as the student wrote it.
+  normalizeType(type){
+    if(!type)return type;
+    const base=type.split('[')[0],up=base.toUpperCase();
+    if(['INTEGER','REAL','STRING','BOOLEAN','CHAR','DATE','ARRAY'].includes(up))return up+type.slice(base.length);
+    return type;
+  }
   async execBlock(lines,from,to){let i=from;while(i<to)i=await this.execLine(lines,i,to);}
   async execLine(lines,i,to){
     this.currentLine=lines[i].ln;
     const s=lines[i].src;
     if(/^DECLARE\s+/i.test(s)){
       const m=s.match(/^DECLARE\s+((?:\w+\s*,\s*)*\w+)\s*(?::\s*(\w+(?:\[.*?\])?))?/i);
+      if(m)for(const n of m[1].split(','))this.checkName(n.trim());
       if(m){
         const names=m[1].split(',').map(n=>n.trim()).filter(Boolean);
-        const type=m[2]||'',baseType=type.split('[')[0];
+        // Built-in type names are case-insensitive like every other keyword
+        // (Integer / integer / INTEGER all work) and are normalised to upper
+        // case here; class names stay exactly as written, since those ARE
+        // case-sensitive.
+        const type=this.normalizeType(m[2]||''),baseType=type.split('[')[0];
         if(type&&!['INTEGER','REAL','STRING','BOOLEAN','CHAR','DATE'].includes(baseType)&&baseType!=='ARRAY'&&!(baseType in this.classes))
           this.err('Unknown data type "'+type+'" in DECLARE '+names.join(', ')+' — expected INTEGER, REAL, STRING, BOOLEAN, CHAR, DATE, ARRAY, or a class name declared earlier with CLASS (case-sensitive)');
         for(const name of names){
@@ -1091,6 +1205,13 @@ class PseudoInterpreter {
     if(type==='BOOLEAN'&&typeof val!=='boolean')
       this.err('Type mismatch: cannot assign '+JSON.stringify(val)+' to BOOLEAN variable "'+name+'"');
   }
+  // Variable names become object keys; these few would reach into JavaScript's
+  // own object machinery rather than the pseudocode program's variables.
+  checkName(name){
+    if(['__proto__','constructor','prototype'].includes(name))
+      this.err('"'+name+'" is a reserved name and cannot be used as a variable');
+  }
+
   async idxKey(s){const parts=this.splitTop(s,',');const vals=[];for(const p of parts)vals.push(await this.eval(p.trim()));return vals.join(',');}
   async execIf(lines,i,to){
     const condStr=lines[i].src.replace(/^IF\s+/i,'').replace(/\s+THEN\s*$/i,'').trim();
@@ -1104,6 +1225,9 @@ class PseudoInterpreter {
   async execFor(lines,i,to){
     const m=lines[i].src.match(/^FOR\s+(\w+)\s*←\s*(.+?)\s+TO\s+(.+?)(?:\s+STEP\s+(.+))?$/i);
     if(!m)this.err('Invalid FOR — expected: FOR variable ← start TO end [STEP step]  (check the ← arrow between the variable and the start value)');const vn=m[1],stop=Number(await this.eval(m[3])),step=m[4]?Number(await this.eval(m[4])):1;
+    if(step===0)this.err('STEP 0 in a FOR loop — the counter would never move, so the loop can never finish. Use a positive STEP to count up or a negative STEP to count down');
+    if(Number.isNaN(step))this.err('STEP value is not a number in this FOR loop — check the expression after STEP');
+    if(Number.isNaN(stop))this.err('The TO value is not a number in this FOR loop — check the expression after TO');
     let depth=0,nextIdx=-1;
     for(let j=i;j<to;j++){if(/^FOR\s+/i.test(lines[j].src))depth++;if(/^NEXT\s+/i.test(lines[j].src)){depth--;if(depth===0){nextIdx=j;break;}}}
     if(nextIdx<0)this.err('Missing NEXT');
@@ -1177,7 +1301,7 @@ class PseudoInterpreter {
       if(/^PUBLIC\s*$/i.test(s)){visibility='PUBLIC';j++;continue;}
       if(/^DECLARE\s+/i.test(s)){
         const dm=s.match(/^DECLARE\s+((?:\w+\s*,\s*)*\w+)\s*(?::\s*(\w+(?:\[.*?\])?))?/i);
-        if(dm){const names=dm[1].split(',').map(n=>n.trim()).filter(Boolean),type=dm[2]||'';for(const nm of names)attrs.push({name:nm,type,visibility});}
+        if(dm){const names=dm[1].split(',').map(n=>n.trim()).filter(Boolean),type=this.normalizeType(dm[2]||'');for(const nm of names)attrs.push({name:nm,type,visibility});}
         j++;continue;}
       if(/^PROCEDURE\s+/i.test(s)){
         const pm=s.match(/^PROCEDURE\s+(\w+)\s*(?:\(([^)]*)\))?/i);if(!pm)this.err('Invalid PROCEDURE inside CLASS "'+name+'"');
@@ -1320,10 +1444,12 @@ class PseudoInterpreter {
     if(s.toUpperCase()==='TRUE')return true;if(s.toUpperCase()==='FALSE')return false;
     if(s.toUpperCase()==='NULL')return null;
     if(/^"[^"]*"$/.test(s))return s.slice(1,-1);if(/^'[^']*'$/.test(s))return s.slice(1,-1);
-    if(/^NOT\s+/i.test(s))return!(await this.eval(s.replace(/^NOT\s+/i,'')));
+    // NOT is handled *after* the OR/AND splits below, so that
+    // "NOT a AND b" parses as "(NOT a) AND b" — NOT binds tighter than AND/OR.
     if(s[0]==='('&&this.matchParen(s)===s.length-1)return await this.eval(s.slice(1,-1));
     const or=this.splitTop(s,'OR');if(or.length>1){let acc=false;for(const p of or)acc=acc||(await this.eval(p.trim()));return acc;}
     const and=this.splitTop(s,'AND');if(and.length>1){let acc=true;for(const p of and)acc=acc&&(await this.eval(p.trim()));return acc;}
+    if(/^NOT\s+/i.test(s))return!(await this.eval(s.replace(/^NOT\s+/i,'')));
     for(const op of['<=','>=','<>','!=','=','<','>']){const idx=this.findTop(s,op);if(idx>=0){const L=await this.eval(s.slice(0,idx).trim()),R=await this.eval(s.slice(idx+op.length).trim());if(op==='<=')return L<=R;if(op==='>=')return L>=R;if(op==='<>'||op==='!=')return L!=R;if(op==='=')return L==R;if(op==='<')return L<R;if(op==='>') return L>R;}}
     const as=this.findAddSub(s);if(as>=0){const op=s[as],L=await this.eval(s.slice(0,as).trim()),R=await this.eval(s.slice(as+1).trim());return op==='+'?(typeof L==='string'||typeof R==='string'?String(L)+String(R):Number(L)+Number(R)):Number(L)-Number(R);}
     const md=this.findMul(s);if(md){const L=Number(await this.eval(s.slice(0,md.idx).trim())),R=Number(await this.eval(s.slice(md.idx+md.op.length).trim()));if(md.op==='*')return L*R;if(md.op==='/')return L/R;if(md.op==='MOD')return L%R;if(md.op==='DIV')return Math.trunc(L/R);}
@@ -1420,15 +1546,15 @@ async function runCell(id){
   let promptCount=0;
   const liveInputProvider=async(varName)=>{promptCount++;return await promptInput(varName,promptCount);};
   try{
-    const interp=new PseudoInterpreter(notebookState,liveInputProvider);
+    const interp=new PseudoInterpreter(window._notebookState,liveInputProvider);
     interp.procedures=Object.assign({},window._globalProcs);
     interp.functions=Object.assign({},window._globalFuncs);
     interp.files=Object.assign({},window._globalFiles);
     interp.classes=Object.assign({},window._globalClasses);
     const result=await interp.run(code);
     for(const[name,value]of Object.entries(result.env)){
-      if(name in interp.types||name in notebookState)
-        notebookState[name]={type:result.types[name]||(notebookState[name]?notebookState[name].type:'UNKNOWN'),value,cellId:id};
+      if(name in interp.types||name in window._notebookState)
+        window._notebookState[name]={type:result.types[name]||(window._notebookState[name]?window._notebookState[name].type:'UNKNOWN'),value,cellId:id};
     }
     Object.assign(window._globalProcs,interp.procedures);Object.assign(window._globalFuncs,interp.functions);Object.assign(window._globalFiles,interp.files);Object.assign(window._globalClasses,interp.classes);
     const text=result.output||'(no output)';
@@ -1453,7 +1579,7 @@ function openDrawer(){document.getElementById('nb-drawer').classList.add('open')
 function closeDrawer(){document.getElementById('nb-drawer').classList.remove('open');document.getElementById('drawer-overlay').classList.remove('open');}
 function newNotebook(){
   if(!confirm('Start a new notebook? Current work will be cleared.'))return;
-  notebookState={}; window._notebookState={}; window._executionCounter=0;
+  window._notebookState={}; window._executionCounter=0;
   window._globalProcs={}; window._globalFuncs={}; window._globalFiles={}; window._globalClasses={}; window._currentNotebookId=null;
   document.getElementById('cells-container').innerHTML=''; cells.length=0; window._cellIdCounter=0;
   document.getElementById('nb-title').value='Untitled Notebook';
