@@ -45,7 +45,7 @@
 <!-- Firebase SDKs -->
 <script type="module">
 import { initializeApp }          from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+import { getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged }
                                    from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { getFirestore, doc, setDoc, getDoc, collection, getDocs, deleteDoc, serverTimestamp }
                                    from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
@@ -76,11 +76,26 @@ onAuthStateChanged(auth, user => {
   if (user) loadNotebookList();
 });
 
+// signInWithRedirect leaves an error here (rather than throwing at the call
+// site) for us to pick up after the page reloads and comes back signed in.
+getRedirectResult(auth).catch(e => {
+  if (e && e.code && e.code !== 'auth/no-auth-event') {
+    alert('Sign-in failed: ' + e.message);
+  }
+});
+
 // ── Google Sign-In ───────────────────────────────────
+// Uses a full-page redirect rather than a popup. signInWithPopup relies on a
+// hidden iframe checking third-party storage access before it ever opens the
+// popup; with third-party cookies blocked (Safari's default, and increasingly
+// Chrome's), that check fails and Firebase throws auth/internal-error with no
+// popup ever shown. signInWithRedirect doesn't depend on third-party storage
+// access at all, so it isn't subject to that failure mode. The trade-off is
+// the whole page navigates away to Google and back instead of a popup.
 window.fbSignIn = async () => {
   try {
     const provider = new GoogleAuthProvider();
-    await signInWithPopup(auth, provider);
+    await signInWithRedirect(auth, provider);
   } catch(e) { alert('Sign-in failed: ' + e.message); }
 };
 
