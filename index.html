@@ -45,7 +45,7 @@
 <!-- Firebase SDKs -->
 <script type="module">
 import { initializeApp }          from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-import { getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged }
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged }
                                    from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { getFirestore, doc, setDoc, getDoc, collection, getDocs, deleteDoc, serverTimestamp }
                                    from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
@@ -85,18 +85,24 @@ getRedirectResult(auth).catch(e => {
 });
 
 // ── Google Sign-In ───────────────────────────────────
-// Uses a full-page redirect rather than a popup. signInWithPopup relies on a
-// hidden iframe checking third-party storage access before it ever opens the
-// popup; with third-party cookies blocked (Safari's default, and increasingly
-// Chrome's), that check fails and Firebase throws auth/internal-error with no
-// popup ever shown. signInWithRedirect doesn't depend on third-party storage
-// access at all, so it isn't subject to that failure mode. The trade-off is
-// the whole page navigates away to Google and back instead of a popup.
+// Try the popup first (no full-page navigation, so it works the same way
+// regardless of which domain authDomain points at). Only fall back to a
+// full-page redirect for failures that mean the popup itself couldn't be
+// used (blocked, or the pre-popup storage-access check failing) — not for
+// e.g. the user closing the popup on purpose, which shouldn't force them
+// into a redirect they didn't ask for.
+const POPUP_FALLBACK_CODES = ['auth/popup-blocked', 'auth/internal-error', 'auth/operation-not-supported-in-this-environment'];
 window.fbSignIn = async () => {
+  const provider = new GoogleAuthProvider();
   try {
-    const provider = new GoogleAuthProvider();
-    await signInWithRedirect(auth, provider);
-  } catch(e) { alert('Sign-in failed: ' + e.message); }
+    await signInWithPopup(auth, provider);
+  } catch(e) {
+    if (POPUP_FALLBACK_CODES.includes(e.code)) {
+      try { await signInWithRedirect(auth, provider); } catch(e2) { alert('Sign-in failed: ' + e2.message); }
+    } else if (e.code !== 'auth/popup-closed-by-user' && e.code !== 'auth/cancelled-popup-request') {
+      alert('Sign-in failed: ' + e.message);
+    }
+  }
 };
 
 window.fbSignOut = async () => {
