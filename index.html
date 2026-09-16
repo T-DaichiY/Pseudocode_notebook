@@ -30,7 +30,7 @@
      file (inline script blocks + onclick attributes).
      Note: frame-ancestors is ignored in a <meta> CSP and GitHub Pages cannot
      set HTTP headers, so clickjacking protection is not available here.     -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' https://www.gstatic.com https://esm.sh; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.googleusercontent.com; connect-src 'self' https://esm.sh https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://pseudocode-notebook.firebaseapp.com; frame-src https://pseudocode-notebook.firebaseapp.com https://accounts.google.com; base-uri 'none'; form-action 'none'; object-src 'none'"/>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'unsafe-inline' https://www.gstatic.com https://esm.sh https://apis.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: https://*.googleusercontent.com; connect-src 'self' https://esm.sh https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://pseudocode-notebook.firebaseapp.com https://www.gstatic.com; frame-src https://pseudocode-notebook.firebaseapp.com https://accounts.google.com; base-uri 'none'; form-action 'none'; object-src 'none'"/>
 <meta name="referrer" content="strict-origin-when-cross-origin"/>
 <title>PseudoLab — Cambridge Pseudocode Notebook</title>
 <script>
